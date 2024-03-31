@@ -146,7 +146,7 @@ def runTest(name, args, extraCallInputs, extraModelInputs):
             return
         result = modelOutputs[0]
     elif args.get("runpod", None):
-        RUNPOD_API_URL = "https://api.runpod.ai/v1/"
+        RUNPOD_API_URL = "https://api.runpod.ai/v2/"
         RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
         RUNPOD_MODEL_KEY = os.getenv("RUNPOD_MODEL_KEY")
         if not (RUNPOD_API_KEY and RUNPOD_MODEL_KEY):
@@ -167,11 +167,13 @@ def runTest(name, args, extraCallInputs, extraModelInputs):
 
         if response.status_code != 200:
             print("Unexpected HTTP response code: " + str(response.status_code))
+            response_text = json.loads(response.text)
+            print("Error: '" + response_text.get("error", "Unknown error") + "'")
             sys.exit(1)
 
-        print(response)
+        print('response:', response)
         result = response.json()
-        print(result)
+        print('result:', result)
 
         id = result["id"]
 
@@ -270,8 +272,8 @@ test(
     "txt2img",
     {
         "modelInputs": {
-            "prompt": "realistic field of grass",
-            "num_inference_steps": 20,
+            "prompt": "painting of 3-year-old boy,sweet smile,realistic,from neck up,detailed hair,(((in watercolor style))),created from brush strokes,abstract painting,",
+            "num_inference_steps": 40,
         },
         "callInputs": {
             # "MODEL_ID": "<override_default>",  # (default)
@@ -379,7 +381,7 @@ if True or os.getenv("USE_DREAMBOOTH"):
         # be uploaded somewhere at the end.
         {
             "modelInputs": {
-                "instance_prompt": "a photo of sks dog",
+                "instance_prompt": "a photo of daiton person",
                 "instance_images": list(
                     map(
                         b64encode_file,
@@ -388,8 +390,8 @@ if True or os.getenv("USE_DREAMBOOTH"):
                 ),
                 # Option 1: upload to HuggingFace (see notes below)
                 # Make sure your HF API token has read/write access.
-                # "hub_model_id": "huggingFaceUsername/targetModelName",
-                # "push_to_hub": True,
+                "hub_model_id": "evanscho/davi-tests",
+                "push_to_hub": True,
             },
             "callInputs": {
                 "train": "dreambooth",

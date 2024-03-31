@@ -131,3 +131,6 @@ permutations
 tests/output
 node_modules
 .devcontainer/local.env
+
+# For privacy, all dreambooth input images
+tests/fixtures/dreambooth
