@@ -16,7 +16,7 @@ def test_cloudcache_build_download():
         "MODEL_REVISION": "fp16",
         "MODEL_URL": "s3://",  # <--
     }
-    # conda = "conda run --no-capture-output -n xformers"
+
     conda = ""
     dda = getDDA(
         minio=minio,
@@ -60,7 +60,7 @@ def test_huggingface_build_download():
         "MODEL_PRECISION": "fp16",
         "MODEL_REVISION": "fp16",
     }
-    # conda = "conda run --no-capture-output -n xformers"
+
     conda = ""
     dda = getDDA(
         stream_logs=True,
@@ -105,7 +105,7 @@ def test_checkpoint_url_build_download():
         "MODEL_REVISION": "fp16",
         "CHECKPOINT_URL": "https://huggingface.co/hakurei/waifu-diffusion-v1-3/resolve/main/wd-v1-3-float16.ckpt",
     }
-    # conda = "conda run --no-capture-output -n xformers"
+
     conda = ""
     dda = getDDA(
         stream_logs=True,

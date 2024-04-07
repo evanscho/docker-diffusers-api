@@ -3,12 +3,9 @@
 
 import os
 from loadModel import loadModel, MODEL_IDS
-from diffusers import AutoencoderKL, UNet2DConditionModel, DDPMScheduler
-from transformers import CLIPTextModel, CLIPTokenizer
 from utils import Storage
 import subprocess
 from pathlib import Path
-import shutil
 from convert_to_diffusers import main as convert_to_diffusers
 from download_checkpoint import main as download_checkpoint
 from status import status
@@ -24,11 +21,11 @@ Path(MODELS_DIR).mkdir(parents=True, exist_ok=True)
 
 
 # i.e. don't run during build
-async def send(type: str, status: str, payload: dict = {}, send_opts: dict = {}):
+async def send_status_update(process_name: str, status: str, payload: dict = {}, options: dict = {}):
     if RUNTIME_DOWNLOADS:
-        from send import send as _send
+        from send import send_status_update as _send_status_update
 
-        await _send(type, status, payload, send_opts)
+        await _send_status_update(process_name, status, payload, options)
 
 
 def normalize_model_id(model_id: str, model_revision):
@@ -37,7 +34,7 @@ def normalize_model_id(model_id: str, model_revision):
         normalized_model_id += "--" + model_revision
     return normalized_model_id
 
-
+# Download model from Hugging Face
 async def download_model(
     model_url=None,
     model_id=None,
@@ -46,105 +43,53 @@ async def download_model(
     checkpoint_config_url=None,
     hf_model_id=None,
     model_precision=None,
-    send_opts={},
+    status_update_options={},
     pipeline_class=None,
 ):
+    # Print the function parameters
     print(
         "download_model",
         {
-            "model_url": model_url,
-            "model_id": model_id,
+            "model_url": model_url, # URL for a Diffusers .tar.zst model not on HuggingFace
+            "model_id": model_id, # Can also be a Hugging Face model ID, e.g. "CompVis/stable-diffusion-v1-4"
             "model_revision": model_revision,
-            "hf_model_id": hf_model_id,
-            "checkpoint_url": checkpoint_url,
+            "hf_model_id": hf_model_id, # Hugging Face model ID, e.g. "CompVis/stable-diffusion-v1-4"
+            "checkpoint_url": checkpoint_url, # URL for a checkpoint file
             "checkpoint_config_url": checkpoint_config_url,
         },
     )
-    hf_model_id = hf_model_id or model_id
-    normalized_model_id = model_id
 
-    # if model_url != "": # throws an error, useful to debug stdout/stderr order
+    # If provided a URL for a .tar.zst model, download and extract it
     if model_url:
+        # Normalize the model ID
         normalized_model_id = normalize_model_id(model_id, model_revision)
         print({"normalized_model_id": normalized_model_id})
+
+        # Get the filename from the model URL
         filename = model_url.split("/").pop()
         if not filename:
             filename = normalized_model_id + ".tar.zst"
+
+        # Define the path where the model will be saved
         model_file = os.path.join(MODELS_DIR, filename)
+
+        # Create an appropriate Storage object for the model, depending on whether the URL is for S3 or HTTP
         storage = Storage(
             model_url, default_path=normalized_model_id + ".tar.zst", status=status
         )
-        exists = storage.file_exists()
-        if exists:
+
+        # If the model exists in S3, download and extract it
+        exists_in_s3 = storage.file_exists()
+        if exists_in_s3:
             model_dir = os.path.join(MODELS_DIR, normalized_model_id)
             print("model_dir", model_dir)
             await asyncio.to_thread(storage.download_and_extract, model_file, model_dir)
         else:
-            if checkpoint_url:
-                path = download_checkpoint(checkpoint_url)
-                convert_to_diffusers(
-                    model_id=model_id,
-                    checkpoint_url=checkpoint_url,
-                    checkpoint_config_url=checkpoint_config_url,
-                    path=path,
-                )
-            else:
-                print("Does not exist, let's try find it on huggingface")
-                print(
-                    {
-                        "model_precision": model_precision,
-                        "model_revision": model_revision,
-                    }
-                )
-                # This would be quicker to just model.to(device) afterwards, but
-                # this conveniently logs all the timings (and doesn't happen often)
-                print("download")
-                await send("download", "start", {}, send_opts)
-                model = loadModel(
-                    hf_model_id,
-                    False,
-                    precision=model_precision,
-                    revision=model_revision,
-                    pipeline_class=pipeline_class,
-                )  # download
-                await send("download", "done", {}, send_opts)
+            print("Model not found in S3")
+            raise Exception(f"Model with URL {model_url} not found in S3")
 
-            print("load")
-            model = loadModel(
-                hf_model_id,
-                True,
-                precision=model_precision,
-                revision=model_revision,
-                pipeline_class=pipeline_class,
-            )  # load
-            # dir = "models--" + model_id.replace("/", "--") + "--dda"
-            dir = os.path.join(MODELS_DIR, normalized_model_id)
-            model.save_pretrained(dir, safe_serialization=True)
-
-            # This is all duped from train_dreambooth, need to refactor TODO XXX
-            await send("compress", "start", {}, send_opts)
-            subprocess.run(
-                f"tar cvf - -C {dir} . | zstd -o {model_file}",
-                shell=True,
-                check=True,  # TODO, rather don't raise and return an error in JSON
-            )
-
-            await send("compress", "done", {}, send_opts)
-            subprocess.run(["ls", "-l", model_file])
-
-            await send("upload", "start", {}, send_opts)
-            upload_result = storage.upload_file(model_file, filename)
-            await send("upload", "done", {}, send_opts)
-            print(upload_result)
-            os.remove(model_file)
-
-            # leave model dir for future loads... make configurable?
-            # shutil.rmtree(dir)
-
-            # TODO, swap directories, inside HF's cache structure.
-
-    else:
-        if checkpoint_url:
+    # If provided a non-Diffusers checkpoint URL, download it and convert it to a Diffusers model
+    elif checkpoint_url:
             path = download_checkpoint(checkpoint_url)
             convert_to_diffusers(
                 model_id=model_id,
@@ -152,33 +97,20 @@ async def download_model(
                 checkpoint_config_url=checkpoint_config_url,
                 path=path,
             )
-        else:
-            # do a dry run of loading the huggingface model, which will download weights at build time
-            loadModel(
-                model_id=hf_model_id,
-                load=False,
-                precision=model_precision,
-                revision=model_revision,
-                pipeline_class=pipeline_class,
-            )
+    
+    # If provided a Hugging Face model ID, download it (really won't because we already downloaded it at build time)
+    else:
+        # If no Hugging Face model ID is provided, use the model_id (presuming it's Hugging Face compatible)
+        hf_model_id = hf_model_id or model_id
 
-    # if USE_DREAMBOOTH:
-    # Actually we can re-use these from the above loaded model
-    # Will remove this soon if no more surprises
-    # for subfolder, model in [
-    #     ["tokenizer", CLIPTokenizer],
-    #     ["text_encoder", CLIPTextModel],
-    #     ["vae", AutoencoderKL],
-    #     ["unet", UNet2DConditionModel],
-    #     ["scheduler", DDPMScheduler]
-    # ]:
-    #     print(subfolder, model)
-    #     model.from_pretrained(
-    #         MODEL_ID,
-    #         subfolder=subfolder,
-    #         revision=revision,
-    #         use_auth_token=HF_AUTH_TOKEN,
-    #     )
+        # Do a dry run of loading the huggingface model, which will have already downloaded weights at build time
+        loadModel(
+            model_id=hf_model_id,
+            load=False,
+            precision=model_precision,
+            revision=model_revision,
+            pipeline_class=pipeline_class,
+        )
 
 
 if __name__ == "__main__":

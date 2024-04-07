@@ -20,18 +20,13 @@
 	"forwardPorts": [8000],
 
 	// Uncomment the next line to run commands after the container is created.
-	"postCreateCommand": "scripts/devContainerPostCreate.sh",
+	// "postCreateCommand": "scripts/devContainerPostCreate.sh",
 
 	"customizations": {
 		"vscode": {
 			"extensions": [
-				"ryanluker.vscode-coverage-gutters",
-				"fsevenm.run-it-on",
-				"ms-python.black-formatter",
-			],
-			"settings": {
-				"python.pythonPath": "/opt/conda/bin/python"
-			}
+				"ms-python.autopep8"
+			]
 		}
 	},
 

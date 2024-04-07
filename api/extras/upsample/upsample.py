@@ -3,9 +3,6 @@ import asyncio
 from pathlib import Path
 
 import base64
-from io import BytesIO
-import PIL
-import json
 import cv2
 import numpy as np
 import torch
@@ -19,7 +16,7 @@ from gfpgan import GFPGANer
 from .models import models_by_type, upsamplers, face_enhancers
 from status import status
 from utils import Storage
-from send import send
+from send import send_status_update
 
 print(
     {
@@ -36,36 +33,36 @@ def cache_path(filename):
     return os.path.join(CACHE_DIR, filename)
 
 
-async def assert_model_exists(src, filename, send_opts, opts={}):
+async def assert_model_exists(src, filename, status_update_options, opts={}):
     dest = cache_path(filename) if not opts.get("absolutePath", None) else filename
     if not os.path.exists(dest):
-        await send("download", "start", {}, send_opts)
+        await send_status_update("download", "start", {}, status_update_options)
         storage = Storage(src, status=status)
         # await storage.download_file(dest)
         await asyncio.to_thread(storage.download_file, dest)
-        await send("download", "done", {}, send_opts)
+        await send_status_update("download", "done", {}, status_update_options)
 
 
-async def download_models(send_opts={}):
+async def download_models(status_update_options={}):
     Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
     for type in models_by_type:
         models = models_by_type[type]
         for model_key in models:
             model = models[model_key]
-            await assert_model_exists(model["weights"], model["filename"], send_opts)
+            await assert_model_exists(model["weights"], model["filename"], status_update_options)
 
     Path("gfpgan/weights").mkdir(parents=True, exist_ok=True)
 
     await assert_model_exists(
         "https://github.com/xinntao/facexlib/releases/download/v0.1.0/detection_Resnet50_Final.pth",
         "detection_Resnet50_Final.pth",
-        send_opts,
+        status_update_options,
     )
     await assert_model_exists(
         "https://github.com/xinntao/facexlib/releases/download/v0.2.2/parsing_parsenet.pth",
         "parsing_parsenet.pth",
-        send_opts,
+        status_update_options,
     )
 
     # hardcoded paths in xinntao/facexlib
@@ -83,7 +80,7 @@ nets = {
 models = {}
 
 
-async def upsample(model_inputs, call_inputs, send_opts={}, startRequestId=None):
+async def upsample(model_inputs, call_inputs, status_update_options={}, startRequestId=None):
     global models
 
     # TODO, only download relevant models for this request
@@ -113,11 +110,11 @@ async def upsample(model_inputs, call_inputs, send_opts={}, startRequestId=None)
             }
         else:
             modelModel = nets[model["net"]](**model["initArgs"])
-            await send(
+            await send_status_update(
                 "loadModel",
                 "start",
                 {"startRequestId": startRequestId},
-                send_opts,
+                status_update_options,
             )
             upsampler = RealESRGANer(
                 scale=model["netscale"],
@@ -129,11 +126,11 @@ async def upsample(model_inputs, call_inputs, send_opts={}, startRequestId=None)
                 pre_pad=0,
                 half=True,
             )
-            await send(
+            await send_status_update(
                 "loadModel",
                 "done",
                 {"startRequestId": startRequestId},
-                send_opts,
+                status_update_options,
             )
             model.update({"model": modelModel, "upsampler": upsampler})
             models.update({model_id: model})
@@ -163,11 +160,11 @@ async def upsample(model_inputs, call_inputs, send_opts={}, startRequestId=None)
     if face_enhance:
         face_enhancer = models.get("GFPGAN", None)
         if not face_enhancer:
-            await send(
+            await send_status_update(
                 "loadModel",
                 "start",
                 {"startRequestId": startRequestId},
-                send_opts,
+                status_update_options,
             )
             print("1) " + cache_path(face_enhancers["GFPGAN"]["filename"]))
             face_enhancer = GFPGANer(
@@ -177,11 +174,11 @@ async def upsample(model_inputs, call_inputs, send_opts={}, startRequestId=None)
                 channel_multiplier=2,
                 bg_upsampler=upsampler,
             )
-            await send(
+            await send_status_update(
                 "loadModel",
                 "done",
                 {"startRequestId": startRequestId},
-                send_opts,
+                status_update_options,
             )
             models.update({"GFPGAN": face_enhancer})
 
@@ -194,7 +191,7 @@ async def upsample(model_inputs, call_inputs, send_opts={}, startRequestId=None)
     # bytes = BytesIO(base64.decodebytes(bytes(model_inputs["input_image"], "utf-8")))
     img = cv2.imdecode(image_np, cv2.IMREAD_UNCHANGED)
 
-    await send("inference", "start", {"startRequestId": startRequestId}, send_opts)
+    await send_status_update("inference", "start", {"startRequestId": startRequestId}, status_update_options)
 
     # Run the model
     # with autocast("cuda"):
@@ -208,7 +205,7 @@ async def upsample(model_inputs, call_inputs, send_opts={}, startRequestId=None)
 
     image_base64 = base64.b64encode(cv2.imencode(".jpg", output)[1]).decode()
 
-    await send("inference", "done", {"startRequestId": startRequestId}, send_opts)
+    await send_status_update("inference", "done", {"startRequestId": startRequestId}, status_update_options)
 
     # Return the results as a dictionary
     return {"$meta": {}, "image_base64": image_base64}

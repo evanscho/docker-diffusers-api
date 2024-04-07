@@ -20,7 +20,7 @@ by modifying the appropriate lines in the `Dockerfile`, or by specifying, e.g.
 ```Dockerfile
 ARG AWS_ACCESS_KEY_ID="XXX"
 ARG AWS_SECRET_ACCESS_KEY="XXX"
-ARG AWS_DEFAULT_REGION="us-west-1" # best for banana
+ARG AWS_DEFAULT_REGION="us-east-1" # check what is best for GPU provider you use
 # Optional.  ONLY SET THIS IF YOU KNOW YOU NEED TO.
 # Usually only if you're using non-Amazon S3-compatible storage.
 # If you need this, your provider will tell you exactly what

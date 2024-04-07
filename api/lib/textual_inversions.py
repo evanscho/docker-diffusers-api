@@ -38,19 +38,6 @@ async def handle_textual_inversions(textual_inversions: list, model, status):
         if model is not last_textual_inversion_model:
             loaded_textual_inversion_tokens = []
             last_textual_inversion_model = model
-        # print({"textual_inversions": textual_inversions})
-        # tokens_to_load = extract_tokens_from_list(textual_inversions)
-        # print({"tokens_loaded": loaded_textual_inversion_tokens})
-        # print({"tokens_to_load": tokens_to_load})
-        #
-        # for token in loaded_textual_inversion_tokens:
-        #     if token not in tokens_to_load:
-        #         print("[TextualInversion] Removing uneeded token: " + token)
-        #         del pipeline.tokenizer.get_vocab()[token]
-        #         # del pipeline.text_encoder.get_input_embeddings().weight.data[token]
-        #         pipeline.text_encoder.resize_token_embeddings(len(pipeline.tokenizer))
-        #
-        # loaded_textual_inversion_tokens = tokens_to_load
 
         last_textual_inversions = textual_inversions_str
         for textual_inversion in textual_inversions:

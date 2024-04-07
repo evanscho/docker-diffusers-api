@@ -1,6 +1,5 @@
-import torch
 import os
-from diffusers import pipelines as _pipelines, AutoPipelineForText2Image
+from diffusers import pipelines as diffusers_pipelines, AutoPipelineForText2Image
 from getScheduler import getScheduler, DEFAULT_SCHEDULER
 from precision import torch_dtype_from_precision
 from device import device
@@ -16,7 +15,6 @@ MODELS_DIR = os.path.join(HOME, ".cache", "diffusers-api")
 MODEL_IDS = [
     "CompVis/stable-diffusion-v1-4",
     "hakurei/waifu-diffusion",
-    # "hakurei/waifu-diffusion-v1-3", - not as diffusers yet
     "runwayml/stable-diffusion-inpainting",
     "runwayml/stable-diffusion-v1-5",
     "stabilityai/stable-diffusion-2"
@@ -24,19 +22,25 @@ MODEL_IDS = [
     "stabilityai/stable-diffusion-2-inpainting",
 ]
 
-
+# Loads a model from the cache or downloads it from Hugging Face.
+# Author designed it so that downloading can be done in a separate call from the loading to GPU,
+# so that they can be independently timed.
 def loadModel(
     model_id: str,
-    load=True,
+    load=True, # If false, will just download the model (if not already cached), and not load it to GPU
     precision=None,
     revision=None,
-    send_opts={},
+    status_update_options={},
     pipeline_class=None,
 ):
+    # Convert precision to torch dtype
     torch_dtype = torch_dtype_from_precision(precision)
+
+    # If revision is an empty string, set it to None
     if revision == "":
         revision = None
 
+    # Print the function parameters
     print(
         "loadModel",
         {
@@ -48,12 +52,15 @@ def loadModel(
         },
     )
 
+    # If no pipeline class is provided, use the default AutoPipelineForText2Image
     if not pipeline_class:
         pipeline_class = AutoPipelineForText2Image
 
-    pipeline = pipeline_class if PIPELINE == "ALL" else getattr(_pipelines, PIPELINE)
+    # Get the pipeline class, either from the provided pipeline_class or by retrieving it from diffusers_pipelines
+    pipeline = pipeline_class if PIPELINE == "ALL" else getattr(diffusers_pipelines, PIPELINE)
     print("pipeline", pipeline_class)
 
+    # Print the model that's being loaded or downloaded
     print(
         ("Loading" if load else "Downloading")
         + " model: "
@@ -61,13 +68,18 @@ def loadModel(
         + (f" ({revision})" if revision else "")
     )
 
+    # Get the scheduler for the model
     scheduler = getScheduler(model_id, DEFAULT_SCHEDULER, not load)
 
+    # Get the directory for the model
     model_dir = os.path.join(MODELS_DIR, model_id)
     if not os.path.isdir(model_dir):
         model_dir = None
 
+    # Start timing the model downloading and loading
     from_pretrained = time.time()
+
+    # Download the model or retrieve from cache
     model = pipeline.from_pretrained(
         model_dir or model_id,
         revision=revision,
@@ -75,11 +87,10 @@ def loadModel(
         use_auth_token=HF_AUTH_TOKEN,
         scheduler=scheduler,
         local_files_only=load,
-        # Work around https://github.com/huggingface/diffusers/issues/1246
-        # low_cpu_mem_usage=False if USE_DREAMBOOTH else True,
     )
     from_pretrained = round((time.time() - from_pretrained) * 1000)
 
+    # If the model should be loaded, move it to the GPU
     if load:
         to_gpu = time.time()
         model.to(device)
@@ -88,4 +99,5 @@ def loadModel(
     else:
         print(f"Downloaded in {from_pretrained} ms")
 
+    # Return the model if it was loaded, otherwise return None
     return model if load else None

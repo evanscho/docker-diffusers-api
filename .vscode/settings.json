@@ -10,8 +10,6 @@
   ],
   "python.testing.unittestEnabled": false,
   "python.testing.pytestEnabled": true,
-  // "python.defaultInterpreterPath": "/opt/conda/envs/xformers/bin/python",
-  "python.defaultInterpreterPath": "/opt/conda/bin/python",
   "runItOn": {
     "commands": [
         {
@@ -23,7 +21,6 @@
     ],
   },
   "[python]": {
-    "editor.defaultFormatter": "ms-python.black-formatter"
+    "editor.defaultFormatter": "ms-python.autopep8"
   },
-  "python.formatting.provider": "none"
 }

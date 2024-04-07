@@ -1,15 +1,13 @@
 import asyncio
-from sched import scheduler
 import torch
 
-from torch import autocast
 from diffusers import __version__
 import base64
 from io import BytesIO
 import PIL
 import json
 from loadModel import loadModel
-from send import send, getTimings, clearSession
+from send import send_status_update, get_process_durations, initialize_session
 from status import status
 import os
 import numpy as np
@@ -22,7 +20,7 @@ from getPipeline import (
     listAvailablePipelines,
     clearPipelines,
 )
-import re
+
 import requests
 from download import download_model, normalize_model_id
 import traceback
@@ -32,17 +30,14 @@ from utils import Storage
 from hashlib import sha256
 from threading import Timer
 import extras
-import jxlpy
-from jxlpy import JXLImagePlugin
 
+# from torch import autocast
+# import re
 
 from diffusers import (
     StableDiffusionXLPipeline,
     StableDiffusionXLImg2ImgPipeline,
     StableDiffusionXLInpaintPipeline,
-    pipelines as diffusers_pipelines,
-    AutoencoderTiny,
-    AutoencoderKL,
 )
 
 from lib.textual_inversions import handle_textual_inversions
@@ -52,8 +47,6 @@ from lib.vars import (
     USE_DREAMBOOTH,
     MODEL_ID,
     PIPELINE,
-    HF_AUTH_TOKEN,
-    HOME,
     MODELS_DIR,
 )
 
@@ -63,43 +56,26 @@ print(os.environ.get("USE_PATCHMATCH"))
 if os.environ.get("USE_PATCHMATCH") == "1":
     from PyPatchMatch import patch_match
 
+# Disable gradient computation in PyTorch by default since it's memory-intensive; only enable it when training
 torch.set_grad_enabled(False)
+
 always_normalize_model_id = None
 
-tiny_vae = None
 
-
-# still working on this, not in use yet.
-def tinyVae(origVae: AutoencoderKL):
-    global tiny_vae
-    if not tiny_vae:
-        tiny_vae = AutoencoderTiny.from_pretrained(
-            "madebyollin/taesd",
-            torch_dtype=torch.float16,
-            in_channels=origVae.config.in_channels,
-            out_channels=origVae.config.out_channels,
-            act_fn=origVae.config.act_fn,
-            latent_channels=origVae.config.latent_channels,
-            scaling_factor=origVae.config.scaling_factor,
-            force_upcast=origVae.config.force_upcast,
-        )
-        tiny_vae.to("cuda")
-
-    return tiny_vae
-
-
-# Init is ran on server startup
+# Init is run on server startup
 # Load your model to GPU as a global variable here using the variable name "model"
 def init():
-    global model  # needed for bananna optimizations
+    global model  # needed for banana optimizations; TODO ESS: remove this line and subsequent uses until its re-instantiation in inference()
     global always_normalize_model_id
 
+    # Send a status update indicating that the initialization has started
     asyncio.run(
-        send(
+        send_status_update(
             "init",
             "start",
             {
                 "device": device_name,
+                # HOSTNAME is set automatically in Linux; in a container it's the container's ID
                 "hostname": os.getenv("HOSTNAME"),
                 "model_id": MODEL_ID,
                 "diffusers": __version__,
@@ -107,10 +83,12 @@ def init():
         )
     )
 
+    # If MODEL_ID is set to "ALL" or runtime downloads are enabled, set last_model_id to None
     if MODEL_ID == "ALL" or RUNTIME_DOWNLOADS:
         global last_model_id
         last_model_id = None
 
+    # If runtime downloads are not enabled, load the model at init time
     if not RUNTIME_DOWNLOADS:
         normalized_model_id = normalize_model_id(MODEL_ID, MODEL_REVISION)
         model_dir = os.path.join(MODELS_DIR, normalized_model_id)
@@ -128,13 +106,18 @@ def init():
     else:
         model = None
 
-    asyncio.run(send("init", "done"))
+    # Send a status update indicating that the initialization is done
+    asyncio.run(send_status_update("init", "done"))
+
+# Function to decode a base64-encoded image
 
 
 def decodeBase64Image(imageStr: str, name: str) -> PIL.Image:
     image = PIL.Image.open(BytesIO(base64.decodebytes(bytes(imageStr, "utf-8"))))
     print(f'Decoded image "{name}": {image.format} {image.width}x{image.height}')
     return image
+
+# Function to download an image from a URL
 
 
 def getFromUrl(url: str, name: str) -> PIL.Image:
@@ -143,58 +126,78 @@ def getFromUrl(url: str, name: str) -> PIL.Image:
     print(f'Decoded image "{name}": {image.format} {image.width}x{image.height}')
     return image
 
+# Function to truncate inputs to a manageable size for logging or debugging
+
 
 def truncateInputs(inputs: dict):
-    clone = inputs.copy()
-    if "modelInputs" in clone:
-        modelInputs = clone["modelInputs"] = clone["modelInputs"].copy()
+    inputs_copy = inputs.copy()
+    if "modelInputs" in inputs_copy:
+        # Create a shallow copy of the modelInputs dictionary since even with the shalow copy of 'inputs',
+        # the original modelInputs dictionary is still a reference to the original modelInputs dictionary.
+        model_inputs = inputs_copy["modelInputs"] = inputs_copy["modelInputs"].copy()
+
+        # Truncate all image inputs to the first 6 characters
         for item in ["init_image", "mask_image", "image", "input_image"]:
-            if item in modelInputs:
-                modelInputs[item] = modelInputs[item][0:6] + "..."
-        if "instance_images" in modelInputs:
-            modelInputs["instance_images"] = list(
-                map(lambda str: str[0:6] + "...", modelInputs["instance_images"])
+            if item in model_inputs:
+                model_inputs[item] = model_inputs[item][0:6] + "..."
+        if "instance_images" in model_inputs:
+            model_inputs["instance_images"] = list(
+                map(lambda str: str[0:6] + "...", model_inputs["instance_images"])
             )
-    return clone
+    return inputs_copy
+
+# TODO, move to device.py
 
 
-# last_xformers_memory_efficient_attention = {}
+def calculate_memory_usage():
+    if torch.cuda.is_available():
+        return torch.cuda.memory_allocated() / torch.cuda.max_memory_allocated()
+    return 0
+
+
 last_attn_procs = None
 last_lora_weights = None
 cross_attention_kwargs = None
 
 
-# Inference is ran for every server call
-# Reference your preloaded global model variable here.
+# This function is used to perform inference (or training!) on the model with the provided inputs.
+# It's run with every server call.
+# It's an asynchronous function, meaning it's designed to handle multiple requests at the same time.
 async def inference(all_inputs: dict, response) -> dict:
     global model
-    global pipelines
     global last_model_id
-    global schedulers
-    # global last_xformers_memory_efficient_attention
     global always_normalize_model_id
     global last_attn_procs
     global last_lora_weights
     global cross_attention_kwargs
 
-    clearSession()
+    # Start new session since starting a new inference
+    initialize_session()
 
+    # Print the inputs for debugging purposes
     print(json.dumps(truncateInputs(all_inputs), indent=2))
+
+    # Extract model inputs and call inputs from the all_inputs dictionary
     model_inputs = all_inputs.get("modelInputs", None)
     call_inputs = all_inputs.get("callInputs", None)
+
+    # Initialize the result dictionary with a "$meta" key
     result = {"$meta": {}}
 
-    send_opts = {}
+    # Prepare options for status update based on the provided call inputs and function parameters
+    status_update_options = {}
     if call_inputs.get("SEND_URL", None):
-        send_opts.update({"SEND_URL": call_inputs.get("SEND_URL")})
+        status_update_options.update({"SEND_URL": call_inputs.get("SEND_URL")})
     if call_inputs.get("SIGN_KEY", None):
-        send_opts.update({"SIGN_KEY": call_inputs.get("SIGN_KEY")})
+        status_update_options.update({"SIGN_KEY": call_inputs.get("SIGN_KEY")})
     if response:
-        send_opts.update({"response": response})
+        status_update_options.update({"response": response})
 
+        # Define an asynchronous function to send status updates
         async def sendStatusAsync():
             await response.send(json.dumps(status.get()) + "\n")
 
+        # Define a function to run the asynchronous status update function and schedule it to run every second
         def sendStatus():
             try:
                 asyncio.run(sendStatusAsync())
@@ -202,8 +205,10 @@ async def inference(all_inputs: dict, response) -> dict:
             except:
                 pass
 
+        # Start the timer to send status updates
         Timer(1.0, sendStatus).start()
 
+    # If either model inputs or call inputs are missing, return an error
     if model_inputs == None or call_inputs == None:
         return {
             "$error": {
@@ -213,8 +218,10 @@ async def inference(all_inputs: dict, response) -> dict:
             }
         }
 
+    # Extract the start request ID from the call inputs
     startRequestId = call_inputs.get("startRequestId", None)
 
+    # If the call inputs specify an 'extra' coroutine to use, call that extra asynchronously
     use_extra = call_inputs.get("use_extra", None)
     if use_extra:
         extra = getattr(extras, use_extra, None)
@@ -232,10 +239,11 @@ async def inference(all_inputs: dict, response) -> dict:
         return await extra(
             model_inputs,
             call_inputs,
-            send_opts=send_opts,
+            status_update_options=status_update_options,
             startRequestId=startRequestId,
         )
 
+    # Extract the model ID from the call inputs or fall back to the MODEL_ID env var
     model_id = call_inputs.get("MODEL_ID", None)
     if not model_id:
         if not MODEL_ID:
@@ -246,31 +254,38 @@ async def inference(all_inputs: dict, response) -> dict:
                 }
             }
         model_id = MODEL_ID
+        # Update metadata with the new model ID
         result["$meta"].update({"MODEL_ID": MODEL_ID})
+
+    # Use the model ID as the normalized model ID by default
     normalized_model_id = model_id
 
+    # If runtime downloads are enabled, download the model and related files
     if RUNTIME_DOWNLOADS:
+        # Extract various parameters from the call inputs
         hf_model_id = call_inputs.get("HF_MODEL_ID", None)
         model_revision = call_inputs.get("MODEL_REVISION", None)
         model_precision = call_inputs.get("MODEL_PRECISION", None)
         checkpoint_url = call_inputs.get("CHECKPOINT_URL", None)
         checkpoint_config_url = call_inputs.get("CHECKPOINT_CONFIG_URL", None)
+
+        # Normalize the model ID
         normalized_model_id = normalize_model_id(model_id, model_revision)
+
+        # Define the directory where the model should be stored
         model_dir = os.path.join(MODELS_DIR, normalized_model_id)
+
+        # Extract the pipeline name from the call inputs, and get the corresponding pipeline class
         pipeline_name = call_inputs.get("PIPELINE", None)
         if pipeline_name:
             pipeline_class = getPipelineClass(pipeline_name)
+
+        # If the last model ID is not the same as the new normalized model ID, download and load the new model
         if last_model_id != normalized_model_id:
-            # if not downloaded_models.get(normalized_model_id, None):
+            # If the model is not on disk in the expected location, download it
             if not os.path.isdir(model_dir):
                 model_url = call_inputs.get("MODEL_URL", None)
                 if not model_url:
-                    # return {
-                    #     "$error": {
-                    #         "code": "NO_MODEL_URL",
-                    #         "message": "Currently RUNTIME_DOWNOADS requires a MODEL_URL callInput",
-                    #     }
-                    # }
                     normalized_model_id = hf_model_id or model_id
                 await download_model(
                     model_id=model_id,
@@ -280,33 +295,42 @@ async def inference(all_inputs: dict, response) -> dict:
                     checkpoint_config_url=checkpoint_config_url,
                     hf_model_id=hf_model_id,
                     model_precision=model_precision,
-                    send_opts=send_opts,
+                    status_update_options=status_update_options,
                     pipeline_class=pipeline_class if pipeline_name else None,
                 )
-                # downloaded_models.update({normalized_model_id: True})
+
+            # Clear the pipeline cache when changing the loaded model, as pipelines include references to the model and would
+            # therefore prevent memory being reclaimed after unloading the previous model.
             clearPipelines()
+
+            # Reset the cross attention arguments
             cross_attention_kwargs = None
+
+            # If a model is already loaded, move it to the CPU to avoid a memory leak
+            # TODO ESS: Understand why this works
             if model:
-                model.to("cpu")  # Necessary to avoid a memory leak
-            await send(
-                "loadModel", "start", {"startRequestId": startRequestId}, send_opts
-            )
+                model.to("cpu")
+
+            await send_status_update("loadModel", "start", {"startRequestId": startRequestId}, status_update_options)
+
+            # Load the model
             model = await asyncio.to_thread(
                 loadModel,
                 model_id=normalized_model_id,
                 load=True,
                 precision=model_precision,
                 revision=model_revision,
-                send_opts=send_opts,
+                status_update_options=status_update_options,
                 pipeline_class=pipeline_class if pipeline_name else None,
             )
-            await send(
-                "loadModel", "done", {"startRequestId": startRequestId}, send_opts
-            )
+
+            await send_status_update("loadModel", "done", {"startRequestId": startRequestId}, status_update_options)
             last_model_id = normalized_model_id
             last_attn_procs = None
             last_lora_weights = None
     else:
+        # If runtime downloads are not enabled, use the model that was loaded at init time.
+        # TODO ESS: what is always_normalize_model_id, and why is it needed? Was added in commit "https://github.com/kiri-art/docker-diffusers-api/commit/caa7d749d707e688ed1e4935a00ba6c9efdf2537"
         if always_normalize_model_id:
             normalized_model_id = always_normalize_model_id
         print(
@@ -316,13 +340,15 @@ async def inference(all_inputs: dict, response) -> dict:
             }
         )
 
+    # If the model ID is set to "ALL", load the model with the normalized model ID
     if MODEL_ID == "ALL":
         if last_model_id != normalized_model_id:
             clearPipelines()
             cross_attention_kwargs = None
-            model = loadModel(normalized_model_id, send_opts=send_opts)
+            model = loadModel(normalized_model_id, status_update_options=status_update_options)
             last_model_id = normalized_model_id
     else:
+        # Make sure the requested model is the one we have (if runtime downloads are not enabled)
         if model_id != MODEL_ID and not RUNTIME_DOWNLOADS:
             return {
                 "$error": {
@@ -335,10 +361,13 @@ async def inference(all_inputs: dict, response) -> dict:
 
     if PIPELINE == "ALL":
         pipeline_name = call_inputs.get("PIPELINE", None)
+
+        # Extract the pipline name from the call inputs, use the default AutoPipelineForText2Image
         if not pipeline_name:
             pipeline_name = "AutoPipelineForText2Image"
             result["$meta"].update({"PIPELINE": pipeline_name})
 
+        # Get the pipeline for the model
         pipeline = getPipelineForModel(
             pipeline_name,
             model,
@@ -356,13 +385,16 @@ async def inference(all_inputs: dict, response) -> dict:
                 }
             }
     else:
+        # If the pipeline is not set to "ALL", use the model as the pipeline
         pipeline = model
 
+    # Extract the scheduler name from the call inputs, or use the default DPMSolverMultistepScheduler
     scheduler_name = call_inputs.get("SCHEDULER", None)
     if not scheduler_name:
         scheduler_name = "DPMSolverMultistepScheduler"
         result["$meta"].update({"SCHEDULER": scheduler_name})
 
+    # Get the scheduler for the model
     pipeline.scheduler = getScheduler(normalized_model_id, scheduler_name)
     if pipeline.scheduler == None:
         return {
@@ -374,95 +406,81 @@ async def inference(all_inputs: dict, response) -> dict:
             }
         }
 
+    # Use the model's safety checker if it has one, and if the safety checker isn't disabled
     safety_checker = call_inputs.get("safety_checker", True)
     pipeline.safety_checker = (
-        model.safety_checker
-        if safety_checker and hasattr(model, "safety_checker")
-        else None
+        model.safety_checker if safety_checker and hasattr(model, "safety_checker") else None
     )
+
+    # Extract the is_url flag from the call inputs, defaulting to False
     is_url = call_inputs.get("is_url", False)
+
+    # Select the image decoder based on whether the input is an image Url or a base64-encoded image
     image_decoder = getFromUrl if is_url else decodeBase64Image
 
+    # Extract the textual inversions from the call inputs and load them if necessary
     textual_inversions = call_inputs.get("textual_inversions", [])
     await handle_textual_inversions(textual_inversions, model, status=status)
 
-    # Better to use new lora_weights in next section
-    attn_procs = call_inputs.get("attn_procs", None)
-    if attn_procs is not last_attn_procs:
-        if attn_procs:
-            raise Exception(
-                "[REMOVED] Using `attn_procs` for LoRAs is no longer supported. "
-                + "Please use `lora_weights` instead."
-            )
-        last_attn_procs = attn_procs
-    #     if attn_procs:
-    #         storage = Storage(attn_procs, no_raise=True)
-    #         if storage:
-    #             hash = sha256(attn_procs.encode("utf-8")).hexdigest()
-    #             attn_procs_from_safetensors = call_inputs.get(
-    #                 "attn_procs_from_safetensors", None
-    #             )
-    #             fname = storage.url.split("/").pop()
-    #             if attn_procs_from_safetensors and not re.match(
-    #                 r".safetensors", attn_procs
-    #             ):
-    #                 fname += ".safetensors"
-    #             if True:
-    #                 # TODO, way to specify explicit name
-    #                 path = os.path.join(
-    #                     MODELS_DIR, "attn_proc--url_" + hash[:7] + "--" + fname
-    #                 )
-    #             attn_procs = path
-    #             if not os.path.exists(path):
-    #                 storage.download_and_extract(path)
-    #         print("Load attn_procs " + attn_procs)
-    #         # Workaround https://github.com/huggingface/diffusers/pull/2448#issuecomment-1453938119
-    #         if storage and not re.search(r".safetensors", attn_procs):
-    #             attn_procs = torch.load(attn_procs, map_location="cpu")
-    #         pipeline.unet.load_attn_procs(attn_procs)
-    #     else:
-    #         print("Clearing attn procs")
-    #         pipeline.unet.set_attn_processor(CrossAttnProcessor())
-
-    # Currently we only support a single string, but we should allow
-    # and array too in anticipation of multi-LoRA support in diffusers
+    # TODO: Currently we only support a single string, but we should allow
+    # an array too in anticipation of multi-LoRA support in diffusers
     # tracked at https://github.com/huggingface/diffusers/issues/2613.
+
+    # Get the LoRA weights from the inputs and convert the weights to a JSON string
     lora_weights = call_inputs.get("lora_weights", None)
     lora_weights_joined = json.dumps(lora_weights)
+
+    # If the current weights are different from the last ones, process them
     if last_lora_weights != lora_weights_joined:
+        # If there were previous weights, unload them
         if last_lora_weights != None and last_lora_weights != "[]":
             print("Unloading previous LoRA weights")
             pipeline.unload_lora_weights()
 
+        # Update the last weights to the current ones and clear the old cross attention arguments
         last_lora_weights = lora_weights_joined
         cross_attention_kwargs = {}
 
+        # Convert the weights to a list if necessary
         if type(lora_weights) is not list:
             lora_weights = [lora_weights] if lora_weights else []
 
+        # Load each LoRA weight into the cross attention arguments and the pipline's LoRA scale
         if len(lora_weights) > 0:
             for weights in lora_weights:
+                # Create a storage object for the weights
                 storage = Storage(weights, no_raise=True, status=status)
                 if storage:
+                    # Get the filename and scale from the storage query
                     storage_query_fname = storage.query.get("fname")
                     storage_query_scale = (
                         float(storage.query.get("scale")[0])
                         if storage.query.get("scale")
                         else 1
                     )
+                    # Update the cross attention arguments with the LoRA weight's scale
                     cross_attention_kwargs.update({"scale": storage_query_scale})
+
+                    # Update the pipeline's LoRA scale with the LoRA weight's scale
                     # https://github.com/damian0815/compel/issues/42#issuecomment-1656989385
                     pipeline._lora_scale = storage_query_scale
+
+                    # Create a standardized filename for the weights
                     if storage_query_fname:
                         fname = storage_query_fname[0]
                     else:
+                        # If there is no existing filename, generate a hash of the weights and use that to create a filename
                         hash = sha256(weights.encode("utf-8")).hexdigest()
                         fname = "url_" + hash[:7] + "--" + storage.url.split("/").pop()
                     cache_fname = "lora_weights--" + fname
                     path = os.path.join(MODELS_DIR, cache_fname)
+
+                    # If the cached weights do not exist, download them
                     if not os.path.exists(path):
                         await asyncio.to_thread(storage.download_file, path)
                     print("Load lora_weights `" + weights + "` from `" + path + "`")
+
+                    # Load the LoRA weights into the pipeline
                     pipeline.load_lora_weights(
                         MODELS_DIR, weight_name=cache_fname, local_files_only=True
                     )
@@ -476,54 +494,43 @@ async def inference(all_inputs: dict, response) -> dict:
         print("No changes to LoRAs since last call")
 
     # TODO, generalize
+    # Convert the input cross attention arguments to a dictionary object, and combine them with the existing cross attention arguments
     mi_cross_attention_kwargs = model_inputs.get("cross_attention_kwargs", None)
     if mi_cross_attention_kwargs:
+        # Remove the existing cross attention arguments from the model inputs
         model_inputs.pop("cross_attention_kwargs")
+
+        # Instantiate a new cross attention arguments dictionary if it doesn't exist
+        if not cross_attention_kwargs:
+            cross_attention_kwargs = {}
+
+        # If the arguments from the model inputs are a json string, convert them to a dictionary
         if isinstance(mi_cross_attention_kwargs, str):
-            if not cross_attention_kwargs:
-                cross_attention_kwargs = {}
             cross_attention_kwargs.update(json.loads(mi_cross_attention_kwargs))
+
+        # If the arguments from the model inputs are a dictionary, just copy them to the new dictionary
         elif type(mi_cross_attention_kwargs) == dict:
-            if not cross_attention_kwargs:
-                cross_attention_kwargs = {}
             cross_attention_kwargs.update(mi_cross_attention_kwargs)
         else:
+            # If the arguments are not a string or a dictionary, return an error
             return {
                 "$error": {
                     "code": "INVALID_CROSS_ATTENTION_KWARGS",
                     "message": "`cross_attention_kwargs` should be a dict or json string",
                 }
             }
-
     print({"cross_attention_kwargs": cross_attention_kwargs})
+
+    # If there are cross attention arguments (either from the model inputs or otherwise), update the model's cross attention arguments
     if cross_attention_kwargs:
         model_inputs.update({"cross_attention_kwargs": cross_attention_kwargs})
 
-    # Parse out your arguments
-    # prompt = model_inputs.get("prompt", None)
-    # if prompt == None:
-    #     return {"message": "No prompt provided"}
-    #
-    #   height = model_inputs.get("height", 512)
-    #  width = model_inputs.get("width", 512)
-    # num_inference_steps = model_inputs.get("num_inference_steps", 50)
-    # guidance_scale = model_inputs.get("guidance_scale", 7.5)
-    # seed = model_inputs.get("seed", None)
-    #   strength = model_inputs.get("strength", 0.75)
+    # If there are images in the model inputs, decode them
+    for image_type in ["init_image", "image", "mask_image", "input_image"]:  # ESS added "input_image" here
+        if image_type in model_inputs:
+            model_inputs[image_type] = image_decoder(model_inputs.get(image_type), image_type)
 
-    if "init_image" in model_inputs:
-        model_inputs["init_image"] = image_decoder(
-            model_inputs.get("init_image"), "init_image"
-        )
-
-    if "image" in model_inputs:
-        model_inputs["image"] = image_decoder(model_inputs.get("image"), "image")
-
-    if "mask_image" in model_inputs:
-        model_inputs["mask_image"] = image_decoder(
-            model_inputs.get("mask_image"), "mask_image"
-        )
-
+    # If there are instance images in the model inputs, decode them and organize in a list (unlike the other image types, there can be multiple instance images)
     if "instance_images" in model_inputs:
         model_inputs["instance_images"] = list(
             map(
@@ -532,7 +539,7 @@ async def inference(all_inputs: dict, response) -> dict:
             )
         )
 
-    await send("inference", "start", {"startRequestId": startRequestId}, send_opts)
+    await send_status_update("inference", "start", {"startRequestId": startRequestId}, status_update_options)
 
     # Run patchmatch for inpainting
     if call_inputs.get("FILL_MODE", None) == "patchmatch":
@@ -546,31 +553,7 @@ async def inference(all_inputs: dict, response) -> dict:
         mask = mask.repeat(8, axis=0).repeat(8, axis=1)
         model_inputs["mask_image"] = PIL.Image.fromarray(mask)
 
-    # Turning on takes 3ms and turning off 1ms... don't worry, I've got your back :)
-    # x_m_e_a = call_inputs.get("xformers_memory_efficient_attention", True)
-    # last_x_m_e_a = last_xformers_memory_efficient_attention.get(pipeline, None)
-    # if x_m_e_a != last_x_m_e_a:
-    #     if x_m_e_a == True:
-    #         print("pipeline.enable_xformers_memory_efficient_attention()")
-    #         pipeline.enable_xformers_memory_efficient_attention()  # default on
-    #     elif x_m_e_a == False:
-    #         print("pipeline.disable_xformers_memory_efficient_attention()")
-    #         pipeline.disable_xformers_memory_efficient_attention()
-    #     else:
-    #         return {
-    #             "$error": {
-    #                 "code": "INVALID_XFORMERS_MEMORY_EFFICIENT_ATTENTION_VALUE",
-    #                 "message": f"x_m_e_a expects True or False, not: {x_m_e_a}",
-    #                 "requested": x_m_e_a,
-    #                 "available": [True, False],
-    #             }
-    #         }
-    #     last_xformers_memory_efficient_attention.update({pipeline: x_m_e_a})
-
-    # Run the model
-    # with autocast(device_id):
-    # image = pipeline(**model_inputs).images[0]
-
+    # Run the dreambooth training if specified in the call inputs and the environment variable USE_DREAMBOOTH is set
     if call_inputs.get("train", None) == "dreambooth":
         if not USE_DREAMBOOTH:
             return {
@@ -580,64 +563,82 @@ async def inference(all_inputs: dict, response) -> dict:
                 }
             }
 
+        # If runtime downloads are enabled and the model directory exists, set the normalized_model_id to the model directory
         if RUNTIME_DOWNLOADS:
             if os.path.isdir(model_dir):
                 normalized_model_id = model_dir
 
+        # Enable gradient computation in PyTorch for training (it's disabled by default for inference since it's memory-intensive)
         torch.set_grad_enabled(True)
+
+        # Run the TrainDreamBooth function in a separate thread and merge its result with the existing result dictionary
         result = result | await asyncio.to_thread(
             TrainDreamBooth,
             normalized_model_id,
             pipeline,
             model_inputs,
             call_inputs,
-            send_opts=send_opts,
+            status_update_options=status_update_options,
         )
+
+        # Disable gradient computation in PyTorch after training
         torch.set_grad_enabled(False)
-        await send("inference", "done", {"startRequestId": startRequestId}, send_opts)
-        result.update({"$timings": getTimings()})
+
+        # Send a status update indicating that the inference is done
+        await send_status_update("inference", "done", {"startRequestId": startRequestId}, status_update_options)
+
+        # Update the result dictionary with the timing and memory usage information
+        mem_usage = calculate_memory_usage()
+        result.update({"$timings": get_process_durations(), "$mem_usage": mem_usage})
+
+        # Return the result now, since the training is done and we won't be doing inference in this same run
         return result
 
+    # Get the seed from the model inputs if it exists, and create a generator with it or with a random seed
     # Do this after dreambooth as dreambooth accepts a seed int directly.
     seed = model_inputs.get("seed", None)
     if seed == None:
         generator = torch.Generator(device=device)
         generator.seed()
     else:
+        # If there is a seed, use it to create a generator
         generator = torch.Generator(device=device).manual_seed(seed)
         del model_inputs["seed"]
 
+    # Add the new generator to the model inputs
     model_inputs.update({"generator": generator})
 
     callback = None
+    # If the user wants a progress message for each step, create a callback function to do so
     if model_inputs.get("callback_steps", None):
-
-        def callback(step: int, timestep: int, latents: torch.FloatTensor):
+        def callback(step: int, timestep: int, callback_kwargs: dict):
             asyncio.run(
-                send(
+                send_status_update(
                     "inference",
                     "progress",
                     {"startRequestId": startRequestId, "step": step},
-                    send_opts,
+                    status_update_options,
                 )
             )
-
     else:
+        # Otherwise, have the callback function just update the status for each step
         vae = pipeline.vae
-        # vae = tinyVae(vae)
         scaling_factor = vae.config.scaling_factor
         image_processor = pipeline.image_processor
 
-        def callback(step: int, timestep: int, latents: torch.FloatTensor):
+        def callback(step: int, timestep: int, callback_kwargs: dict):
             status.update(
                 "inference", step / model_inputs.get("num_inference_steps", 50)
             )
 
-            # with torch.no_grad():
-            #     image = vae.decode(latents / scaling_factor, return_dict=False)[0]
-            #     image = image_processor.postprocess(image, output_type="pil")[0]
-            #     image.save(f"step_{step}_img0.png")
+    print(
+        {
+            "callback_on_step_end": callback,
+            "**model_inputs": model_inputs,
+        },
+    )
 
+    # Check if the model is a StableDiffusionXL pipeline
     is_sdxl = (
         isinstance(model, StableDiffusionXLPipeline)
         or isinstance(model, StableDiffusionXLImg2ImgPipeline)
@@ -645,31 +646,31 @@ async def inference(all_inputs: dict, response) -> dict:
     )
 
     with torch.inference_mode():
+        # Get the custom pipeline method from the call inputs if it exists
         custom_pipeline_method = call_inputs.get("custom_pipeline_method", None)
-        print(
-            {
-                "callback": callback,
-                "**model_inputs": model_inputs,
-            },
-        )
 
+        # If there are weighted prompts in the call inputs, prepare them
         if call_inputs.get("compel_prompts", False):
             prepare_prompts(pipeline, model_inputs, is_sdxl)
 
+        # Run the pipeline asynchronously
         try:
             async_pipeline = asyncio.to_thread(
                 getattr(pipeline, custom_pipeline_method)
                 if custom_pipeline_method
                 else pipeline,
-                callback=callback,
+                callback_on_step_end=callback,
                 **model_inputs,
             )
+            # TODO ESS: research autocast and see if makes sense to uncomment
             # if call_inputs.get("PIPELINE") != "StableDiffusionPipeline":
-            #    # autocast im2img and inpaint which are broken in 0.4.0, 0.4.1
+            #    # autocast img2img and inpaint which are broken in diffusers 0.4.0, 0.4.1
             #    # still broken in 0.5.1
             #    with autocast(device_id):
             #        images = (await async_pipeline).images
             # else:
+
+            # Await the result of the pipeline
             pipeResult = await async_pipeline
             images = pipeResult.images
 
@@ -683,6 +684,7 @@ async def inference(all_inputs: dict, response) -> dict:
                 }
             }
 
+    # Convert the returned images to base64 in the specified format (default is PNG)
     images_base64 = []
     image_format = call_inputs.get("image_format", "PNG")
     image_opts = (
@@ -693,23 +695,22 @@ async def inference(all_inputs: dict, response) -> dict:
         image.save(buffered, format=image_format, **image_opts)
         images_base64.append(base64.b64encode(buffered.getvalue()).decode("utf-8"))
 
-    await send("inference", "done", {"startRequestId": startRequestId}, send_opts)
+    # Send a 'done' status update for the inference
+    await send_status_update("inference", "done", {"startRequestId": startRequestId}, status_update_options)
 
-    # Return the results as a dictionary
+    # Add the images to the result dictionary
     if len(images_base64) > 1:
         result = result | {"images_base64": images_base64}
     else:
         result = result | {"image_base64": images_base64[0]}
 
+    # Add an NFSW flag to the result if the pipeline detected NSFW content
     nsfw_content_detected = pipeResult.get("nsfw_content_detected", None)
     if nsfw_content_detected:
         result = result | {"nsfw_content_detected": nsfw_content_detected}
 
-    # TODO, move and generalize in device.py
-    mem_usage = 0
-    if torch.cuda.is_available():
-        mem_usage = torch.cuda.memory_allocated() / torch.cuda.max_memory_allocated()
-
-    result = result | {"$timings": getTimings(), "$mem_usage": mem_usage}
+    # Add the timings and memory usage to the result dictionary
+    mem_usage = calculate_memory_usage()
+    result = result | {"$timings": get_process_durations(), "$mem_usage": mem_usage}
 
     return result

@@ -1,0 +1,28 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+sanic = ">=23.12.1"
+sanic-ext = ">=23.12.0"
+websockets = ">=12.0"
+transformers = ">=4.39.2"
+requests-futures = ">=1.0.0"
+numpy = ">=1.25.1"
+accelerate = ">=0.22.0"
+torch = ">=2.0.1"
+torchvision = ">=0.15.2"
+boto3 = ">=1.28.43"
+botocore = ">=1.31.43"
+xtarfile = {extras = ["zstd"], version = ">=0.1.0"}
+bitsandbytes = ">=0.41.1"
+compel = ">=2.0.2"
+basicsr = {ref = "torchvision-fix", git = "git+https://github.com/evanscho/BasicSR.git"}
+
+[dev-packages]
+pytest = ">=7.4.2"
+pytest-cov = ">=4.1.0"
+
+[requires]
+python_version = "3.10"

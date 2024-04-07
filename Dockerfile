@@ -1,8 +1,4 @@
-ARG FROM_IMAGE="pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime"
-# ARG FROM_IMAGE="gadicc/diffusers-api-base:python3.9-pytorch1.12.1-cuda11.6-xformers"
-# You only need the -banana variant if you need banana's optimization
-# i.e. not relevant if you're using RUNTIME_DOWNLOADS
-# ARG FROM_IMAGE="gadicc/python3.9-pytorch1.12.1-cuda11.6-xformers-banana"
+ARG FROM_IMAGE="pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime"
 FROM ${FROM_IMAGE} as base
 ENV FROM_IMAGE=${FROM_IMAGE}
 
@@ -57,7 +53,6 @@ RUN pip install -e diffusers
 ARG RUNTIME_DOWNLOADS=1
 ENV RUNTIME_DOWNLOADS=${RUNTIME_DOWNLOADS}
 
-# TODO, to dda-bananana
 # ARG PIPELINE="StableDiffusionInpaintPipeline"
 ARG PIPELINE="ALL"
 ENV PIPELINE=${PIPELINE}
@@ -72,9 +67,6 @@ ARG USE_DREAMBOOTH=1
 ENV USE_DREAMBOOTH=${USE_DREAMBOOTH}
 
 RUN if [ "$USE_DREAMBOOTH" = "1" ] ; then \
-    # By specifying the same torch version as conda, it won't download again.
-    # Without this, it will upgrade torch, break xformers, make bigger image.
-    # bitsandbytes==0.40.0.post4 had failed cuda detection on dreambooth test.
     pip install -r diffusers/examples/dreambooth/requirements.txt ; \
   fi
 RUN if [ "$USE_DREAMBOOTH" = "1" ] ; then apt-get install -yqq git-lfs ; fi
@@ -82,8 +74,8 @@ RUN if [ "$USE_DREAMBOOTH" = "1" ] ; then apt-get install -yqq git-lfs ; fi
 ARG USE_REALESRGAN=1
 RUN if [ "$USE_REALESRGAN" = "1" ] ; then apt-get install -yqq libgl1-mesa-glx libglib2.0-0 ; fi
 RUN if [ "$USE_REALESRGAN" = "1" ] ; then git clone https://github.com/xinntao/Real-ESRGAN.git ; fi
-# RUN if [ "$USE_REALESRGAN" = "1" ] ; then pip install numba==0.57.1 chardet ; fi
-RUN if [ "$USE_REALESRGAN" = "1" ] ; then pip install basicsr==1.4.2 facexlib==0.2.5 gfpgan==1.3.8 ; fi
+RUN if [ "$USE_REALESRGAN" = "1" ] ; then pip install git+https://github.com/evanscho/BasicSR.git@torchvision-fix ; fi  # Replaced BasicSR with torchvision-fix branch
+RUN if [ "$USE_REALESRGAN" = "1" ] ; then pip install facexlib>=0.3.0 gfpgan>=1.3.8 ; fi
 RUN if [ "$USE_REALESRGAN" = "1" ] ; then cd Real-ESRGAN && python3 setup.py develop ; fi
 
 COPY api/ .
@@ -92,5 +84,5 @@ EXPOSE 8000
 ARG SAFETENSORS_FAST_GPU=1
 ENV SAFETENSORS_FAST_GPU=${SAFETENSORS_FAST_GPU}
 
-CMD python3 -u server.py
+CMD sanic server:app --host=0.0.0.0 --port=8000 --single-process --debug 2>&1 | tee training.log   # old CMD: python3 -u server.py (was giving errors in newer Sanic)
 

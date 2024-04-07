@@ -4,7 +4,6 @@
 # Instead, edit the init() and inference() functions in app.py
 
 from sanic import Sanic, response
-from sanic_ext import Extend
 import subprocess
 import app as user_src
 import traceback
@@ -16,14 +15,12 @@ import json
 user_src.init()
 
 # Create the http server app
-server = Sanic("my_app")
-server.config.CORS_ORIGINS = os.getenv("CORS_ORIGINS") or "*"
-server.config.RESPONSE_TIMEOUT = 60 * 60  # 1 hour (training can be long)
-Extend(server)
-
+app = Sanic("my_app")
+app.config.CORS_ORIGINS = os.getenv("CORS_ORIGINS") or "*"
+app.config.RESPONSE_TIMEOUT = 60 * 60  # 1 hour (training can be long)
 
 # Healthchecks verify that the environment is correct on Banana Serverless
-@server.route("/healthcheck", methods=["GET"])
+@app.route("/healthcheck", methods=["GET"])
 def healthcheck(request):
     # dependency free way to check if GPU is visible
     gpu = False
@@ -35,7 +32,7 @@ def healthcheck(request):
 
 
 # Inference POST handler at '/' is called for every http call from Banana
-@server.route("/", methods=["POST"])
+@app.route("/", methods=["POST"])
 async def inference(request):
     try:
         all_inputs = response.json.loads(request.json)
@@ -69,4 +66,4 @@ async def inference(request):
 
 
 if __name__ == "__main__":
-    server.run(host="0.0.0.0", port="8000", workers=1)
+    app.run(host="0.0.0.0", port="8000", single_process=True)  # ESS: formerly was workers=1, which was leading to a multiprocessing bug

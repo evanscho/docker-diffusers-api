@@ -21,7 +21,6 @@ TESTS = path + os.sep + "tests"
 FIXTURES = TESTS + os.sep + "fixtures"
 OUTPUT = TESTS + os.sep + "output"
 TEST_URL = os.environ.get("TEST_URL", "http://localhost:8000/")
-BANANA_API_URL = os.environ.get("BANANA_API_URL", "https://api.banana.dev")
 Path(OUTPUT).mkdir(parents=True, exist_ok=True)
 
 
@@ -99,53 +98,7 @@ def runTest(name, args, extraCallInputs, extraModelInputs):
     print()
 
     start = time.time()
-    if args.get("banana", None):
-        BANANA_API_KEY = os.getenv("BANANA_API_KEY")
-        BANANA_MODEL_KEY = os.getenv("BANANA_MODEL_KEY")
-        if BANANA_MODEL_KEY == None or BANANA_API_KEY == None:
-            print("Error: BANANA_API_KEY or BANANA_MODEL_KEY not set, aborting...")
-            sys.exit(1)
-
-        payload = {
-            "id": str(uuid4()),
-            "created": int(time.time()),
-            "apiKey": BANANA_API_KEY,
-            "modelKey": BANANA_MODEL_KEY,
-            "modelInputs": inputs,
-            "startOnly": False,
-        }
-
-        response = requests.post(f"{BANANA_API_URL}/start/v4/", json=payload)
-
-        result = response.json()
-        callID = result.get("callID")
-
-        if result.get("finished", None) == False:
-            while result.get(
-                "message", None
-            ) != "success" and not "error" in result.get("message", None):
-                secondsSinceStart = time.time() - start
-                print(str(datetime.datetime.now()) + f": t+{secondsSinceStart:.1f}s")
-                print(json.dumps(result, indent=4))
-                print
-                payload = {
-                    "id": str(uuid4()),
-                    "created": int(time.time()),
-                    "longPoll": True,
-                    "apiKey": BANANA_API_KEY,
-                    "callID": callID,
-                }
-                response = requests.post(f"{BANANA_API_URL}/check/v4/", json=payload)
-                result = response.json()
-
-        modelOutputs = result.get("modelOutputs", None)
-        if modelOutputs == None:
-            finish = time.time() - start
-            print(f"Request took {finish:.1f}s")
-            print(result)
-            return
-        result = modelOutputs[0]
-    elif args.get("runpod", None):
+    if args.get("runpod", None):
         RUNPOD_API_URL = "https://api.runpod.ai/v2/"
         RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
         RUNPOD_MODEL_KEY = os.getenv("RUNPOD_MODEL_KEY")
@@ -279,7 +232,6 @@ test(
             # "MODEL_ID": "<override_default>",  # (default)
             # "PIPELINE": "StableDiffusionPipeline",  # (default)
             # "SCHEDULER": "DPMSolverMultistepScheduler",  # (default)
-            # "xformers_memory_efficient_attention": False,  # (default)
         },
     },
 )
@@ -418,14 +370,7 @@ def main(tests_to_run, args, extraCallInputs, extraModelInputs):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--banana", required=False, action="store_true")
     parser.add_argument("--runpod", required=False, action="store_true")
-    parser.add_argument(
-        "--xmfe",
-        required=False,
-        default=None,
-        type=lambda x: bool(distutils.util.strtobool(x)),
-    )
     parser.add_argument("--scheduler", required=False, type=str)
     parser.add_argument("--call-arg", action="append", type=str)
     parser.add_argument("--model-arg", action="append", type=str)
@@ -461,14 +406,12 @@ if __name__ == "__main__":
                 value = float(value)
             model_inputs.update({name: value})
 
-    if args.xmfe != None:
-        call_inputs.update({"xformers_memory_efficient_attention": args.xmfe})
     if args.scheduler:
         call_inputs.update({"SCHEDULER": args.scheduler})
 
     if len(tests_to_run) < 1:
         print(
-            "Usage: python3 test.py [--banana] [--xmfe=1/0] [--scheduler=SomeScheduler] [all / test1] [test2] [etc]"
+            "Usage: python3 test.py [--runpod] [--xmfe=1/0] [--scheduler=SomeScheduler] [all / test1] [test2] [etc]"
         )
         sys.exit()
     elif len(tests_to_run) == 1 and (
