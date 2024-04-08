@@ -3,8 +3,9 @@
 # This is my common way of building, but you can build however you like.
 # Note if you using a proxy, you need to have it running first.
 
+# An additional tag (commented out) can be used for testing: evanscho/diffusers-api-3:test
+
 # DOCKER_BUILDKIT=1 BUILDKIT_PROGRESS=plain \
-  docker build --progress=plain \
-  -t evanscho/diffusers-api-3 \
-  # -t evanscho/diffusers-api-3:test \
+  docker build --progress=plain --no-cache \
+  -t evanscho/diffusers-api-3:3 \
   "$@" .

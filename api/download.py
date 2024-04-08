@@ -28,13 +28,15 @@ async def send_status_update(process_name: str, status: str, payload: dict = {},
         await _send_status_update(process_name, status, payload, options)
 
 
-def normalize_model_id(model_id: str, model_revision):
-    normalized_model_id = "models--" + model_id.replace("/", "--")
+def get_model_filename(model_id: str, model_revision):
+    filename = "models--" + model_id.replace("/", "--")
     if model_revision:
-        normalized_model_id += "--" + model_revision
-    return normalized_model_id
+        filename += "--" + model_revision
+    return filename
 
 # Download model from Hugging Face
+
+
 async def download_model(
     model_url=None,
     model_id=None,
@@ -50,11 +52,11 @@ async def download_model(
     print(
         "download_model",
         {
-            "model_url": model_url, # URL for a Diffusers .tar.zst model not on HuggingFace
-            "model_id": model_id, # Can also be a Hugging Face model ID, e.g. "CompVis/stable-diffusion-v1-4"
+            "model_url": model_url,  # URL for a Diffusers .tar.zst model not on HuggingFace
+            "model_id": model_id,  # Can also be a Hugging Face model ID, e.g. "CompVis/stable-diffusion-v1-4"
             "model_revision": model_revision,
-            "hf_model_id": hf_model_id, # Hugging Face model ID, e.g. "CompVis/stable-diffusion-v1-4"
-            "checkpoint_url": checkpoint_url, # URL for a checkpoint file
+            "hf_model_id": hf_model_id,  # Hugging Face model ID, e.g. "CompVis/stable-diffusion-v1-4"
+            "checkpoint_url": checkpoint_url,  # URL for a checkpoint file
             "checkpoint_config_url": checkpoint_config_url,
         },
     )
@@ -62,26 +64,26 @@ async def download_model(
     # If provided a URL for a .tar.zst model, download and extract it
     if model_url:
         # Normalize the model ID
-        normalized_model_id = normalize_model_id(model_id, model_revision)
-        print({"normalized_model_id": normalized_model_id})
+        model_filename = get_model_filename(model_id, model_revision)
+        print({"model_filename": model_filename})
 
         # Get the filename from the model URL
         filename = model_url.split("/").pop()
         if not filename:
-            filename = normalized_model_id + ".tar.zst"
+            filename = model_filename + ".tar.zst"
 
         # Define the path where the model will be saved
         model_file = os.path.join(MODELS_DIR, filename)
 
         # Create an appropriate Storage object for the model, depending on whether the URL is for S3 or HTTP
         storage = Storage(
-            model_url, default_path=normalized_model_id + ".tar.zst", status=status
+            model_url, default_path=model_filename + ".tar.zst", status=status
         )
 
         # If the model exists in S3, download and extract it
         exists_in_s3 = storage.file_exists()
         if exists_in_s3:
-            model_dir = os.path.join(MODELS_DIR, normalized_model_id)
+            model_dir = os.path.join(MODELS_DIR, model_filename)
             print("model_dir", model_dir)
             await asyncio.to_thread(storage.download_and_extract, model_file, model_dir)
         else:
@@ -90,14 +92,14 @@ async def download_model(
 
     # If provided a non-Diffusers checkpoint URL, download it and convert it to a Diffusers model
     elif checkpoint_url:
-            path = download_checkpoint(checkpoint_url)
-            convert_to_diffusers(
-                model_id=model_id,
-                checkpoint_url=checkpoint_url,
-                checkpoint_config_url=checkpoint_config_url,
-                path=path,
-            )
-    
+        path = download_checkpoint(checkpoint_url)
+        convert_to_diffusers(
+            model_id=model_id,
+            checkpoint_url=checkpoint_url,
+            checkpoint_config_url=checkpoint_config_url,
+            path=path,
+        )
+
     # If provided a Hugging Face model ID, download it (really won't because we already downloaded it at build time)
     else:
         # If no Hugging Face model ID is provided, use the model_id (presuming it's Hugging Face compatible)

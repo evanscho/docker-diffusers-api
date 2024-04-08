@@ -18,25 +18,25 @@ SCHEDULERS = [
 DEFAULT_SCHEDULER = os.getenv("DEFAULT_SCHEDULER", SCHEDULERS[0])
 
 
-def initScheduler(MODEL_ID: str, scheduler_id: str, download=False):
-    print(f"Initializing {scheduler_id} for {MODEL_ID}...")
+def initScheduler(model_id: str, scheduler_id: str, download=False):
+    print(f"Initializing {scheduler_id} for {model_id}...")
     start = time.time()
     scheduler = getattr(_schedulers, scheduler_id)
     if scheduler == None:
         return None
 
-    model_dir = os.path.join(MODELS_DIR, MODEL_ID)
+    model_dir = os.path.join(MODELS_DIR, model_id)
     if not os.path.isdir(model_dir):
         model_dir = None
 
     inittedScheduler = scheduler.from_pretrained(
-        model_dir or MODEL_ID,
+        model_dir or model_id,
         subfolder="scheduler",
         use_auth_token=HF_AUTH_TOKEN,
         local_files_only=not download,
     )
     diff = round((time.time() - start) * 1000)
-    print(f"Initialized {scheduler_id} for {MODEL_ID} in {diff}ms")
+    print(f"Initialized {scheduler_id} for {model_id} in {diff}ms")
 
     return inittedScheduler
 
@@ -44,11 +44,11 @@ def initScheduler(MODEL_ID: str, scheduler_id: str, download=False):
 schedulers = {}
 
 
-def getScheduler(MODEL_ID: str, scheduler_id: str, download=False):
-    schedulersByModel = schedulers.get(MODEL_ID, None)
+def getScheduler(model_id: str, scheduler_id: str, download=False):
+    schedulersByModel = schedulers.get(model_id, None)
     if schedulersByModel == None:
         schedulersByModel = {}
-        schedulers.update({MODEL_ID: schedulersByModel})
+        schedulers.update({model_id: schedulersByModel})
 
     # Check for use of old names
     deprecated_map = {
@@ -67,7 +67,7 @@ def getScheduler(MODEL_ID: str, scheduler_id: str, download=False):
 
     scheduler = schedulersByModel.get(scheduler_id, None)
     if scheduler == None:
-        scheduler = initScheduler(MODEL_ID, scheduler_id, download)
+        scheduler = initScheduler(model_id, scheduler_id, download)
         schedulersByModel.update({scheduler_id: scheduler})
 
     return scheduler

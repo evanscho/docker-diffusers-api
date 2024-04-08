@@ -83,7 +83,7 @@ def send_status_update(process_name: str, status: str, payload: dict = {}, optio
     asyncio.run((_send_status_update(process_name, status, payload, options)))
 
 
-def TrainDreamBooth(model_id: str, pipeline, model_inputs, call_inputs, status_update_options):
+def TrainDreamBooth(model_id: str, pipeline, model_inputs, call_inputs, status_update_options, revision=None, variant=None):
     # required inputs: instance_images instance_prompt
 
     params = {
@@ -91,9 +91,9 @@ def TrainDreamBooth(model_id: str, pipeline, model_inputs, call_inputs, status_u
         "pretrained_model_name_or_path": model_id,  # DDA, TODO
         # Revision of pretrained model identifier from huggingface.co/models. Trainable model components should be
         # float32 precision.
-        "revision": None,
+        "revision": revision,
         # Variant of the model files of the pretrained model identifier from huggingface.co/models, 'e.g.' fp16"
-        "variant": None,
+        "variant": variant,
         "tokenizer_name": None,
         "instance_data_dir": "instance_data_dir",  # DDA TODO
         "class_data_dir": "class_data_dir",  # DDA, was: None,
@@ -436,6 +436,7 @@ def import_model_class_from_model_name_or_path(pretrained_model_name_or_path: st
 
 # DDA: Removed all the argument parsing and moved it to the function signature
 
+
 class DreamBoothDataset(Dataset):
     """
     A dataset to prepare the instance and class images with the prompts for fine-tuning the model.
@@ -632,7 +633,7 @@ def encode_prompt(text_encoder, input_ids, attention_mask, text_encoder_use_atte
     return prompt_embeds
 
 
-def main(args, init_pipeline, status_update_options): # DDA
+def main(args, init_pipeline, status_update_options):  # DDA
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
             "You cannot use both --report_to=wandb and --hub_token due to a security risk of exposing your token."
@@ -840,7 +841,8 @@ def main(args, init_pipeline, status_update_options): # DDA
 
     if args.train_text_encoder and unwrap_model(text_encoder).dtype != torch.float32:
         raise ValueError(
-            f"Text encoder loaded as datatype {unwrap_model(text_encoder).dtype}." f" {low_precision_error_string}"
+            f"Text encoder loaded as datatype {unwrap_model(text_encoder).dtype}."
+            f" {low_precision_error_string}"
         )
 
     # Enable TF32 for faster training on Ampere GPUs,
@@ -1182,7 +1184,8 @@ def main(args, init_pipeline, status_update_options): # DDA
                                 removing_checkpoints = checkpoints[0:num_to_remove]
 
                                 logger.info(
-                                    f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
+                                    f"{len(checkpoints)} checkpoints already exist, \
+                                        removing {len(removing_checkpoints)} checkpoints"
                                 )
                                 logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
 
@@ -1191,7 +1194,7 @@ def main(args, init_pipeline, status_update_options): # DDA
                                     shutil.rmtree(removing_checkpoint)
 
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        pipeline.save_pretrained(save_path) # DDA
+                        pipeline.save_pretrained(save_path)  # DDA
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
@@ -1252,10 +1255,10 @@ def main(args, init_pipeline, status_update_options): # DDA
 
         pipeline.scheduler = pipeline.scheduler.from_config(pipeline.scheduler.config, **scheduler_args)
 
-        pipeline.save_pretrained(args.output_dir, safe_serialization=True) # DDA
+        pipeline.save_pretrained(args.output_dir, safe_serialization=True)  # DDA
 
         if args.push_to_hub:
-            send_status_update("upload", "start", {}, status_update_options) # DDA
+            send_status_update("upload", "start", {}, status_update_options)  # DDA
             save_model_card(
                 repo_id,
                 images=images,
@@ -1269,7 +1272,8 @@ def main(args, init_pipeline, status_update_options): # DDA
                 repo_id=repo_id,
                 folder_path=args.output_dir,
                 commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*", "logs/*"],  # ESS: added "logs/*" to avoid BadRequestError due to adding HF secrets to the HF repository
+                # ESS: added "logs/*" to avoid BadRequestError due to adding HF secrets to the HF repository
+                ignore_patterns=["step_*", "epoch_*", "logs/*"],
                 token=args.hub_token  # ESS: without this, get 401 RepositoryNotFoundError if didn't create new repo, since we were only passing the token in create_repo
                 # DDA
                 # https://github.com/huggingface/huggingface_hub/blob/main/src/huggingface_hub/hf_api.py#L3379
@@ -1279,11 +1283,11 @@ def main(args, init_pipeline, status_update_options): # DDA
                 # run_as_future: TODO
             )
 
-            send_status_update("upload", "done", {}, status_update_options) # DDA
+            send_status_update("upload", "done", {}, status_update_options)  # DDA
 
     accelerator.end_training()
 
-    return {"done": True} # DDA
+    return {"done": True}  # DDA
 
 # DDA
 # if __name__ == "__main__":

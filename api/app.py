@@ -22,7 +22,7 @@ from getPipeline import (
 )
 
 import requests
-from download import download_model, normalize_model_id
+from download import download_model, get_model_filename
 import traceback
 from precision import MODEL_REVISION, MODEL_PRECISION
 from device import device, device_id, device_name
@@ -59,14 +59,11 @@ if os.environ.get("USE_PATCHMATCH") == "1":
 # Disable gradient computation in PyTorch by default since it's memory-intensive; only enable it when training
 torch.set_grad_enabled(False)
 
-always_normalize_model_id = None
-
 
 # Init is run on server startup
 # Load your model to GPU as a global variable here using the variable name "model"
 def init():
     global model  # needed for banana optimizations; TODO ESS: remove this line and subsequent uses until its re-instantiation in inference()
-    global always_normalize_model_id
 
     # Send a status update indicating that the initialization has started
     asyncio.run(
@@ -83,22 +80,13 @@ def init():
         )
     )
 
-    # If MODEL_ID is set to "ALL" or runtime downloads are enabled, set last_model_id to None
-    if MODEL_ID == "ALL" or RUNTIME_DOWNLOADS:
-        global last_model_id
-        last_model_id = None
+    global last_model_filename
+    last_model_filename = None
 
     # If runtime downloads are not enabled, load the model at init time
     if not RUNTIME_DOWNLOADS:
-        normalized_model_id = normalize_model_id(MODEL_ID, MODEL_REVISION)
-        model_dir = os.path.join(MODELS_DIR, normalized_model_id)
-        if os.path.isdir(model_dir):
-            always_normalize_model_id = model_dir
-        else:
-            normalized_model_id = MODEL_ID
-
         model = loadModel(
-            model_id=always_normalize_model_id or MODEL_ID,
+            model_id=MODEL_ID,
             load=True,
             precision=MODEL_PRECISION,
             revision=MODEL_REVISION,
@@ -155,36 +143,7 @@ def calculate_memory_usage():
     return 0
 
 
-last_attn_procs = None
-last_lora_weights = None
-cross_attention_kwargs = None
-
-
-# This function is used to perform inference (or training!) on the model with the provided inputs.
-# It's run with every server call.
-# It's an asynchronous function, meaning it's designed to handle multiple requests at the same time.
-async def inference(all_inputs: dict, response) -> dict:
-    global model
-    global last_model_id
-    global always_normalize_model_id
-    global last_attn_procs
-    global last_lora_weights
-    global cross_attention_kwargs
-
-    # Start new session since starting a new inference
-    initialize_session()
-
-    # Print the inputs for debugging purposes
-    print(json.dumps(truncateInputs(all_inputs), indent=2))
-
-    # Extract model inputs and call inputs from the all_inputs dictionary
-    model_inputs = all_inputs.get("modelInputs", None)
-    call_inputs = all_inputs.get("callInputs", None)
-
-    # Initialize the result dictionary with a "$meta" key
-    result = {"$meta": {}}
-
-    # Prepare options for status update based on the provided call inputs and function parameters
+def prepare_status_update_options(call_inputs, response):
     status_update_options = {}
     if call_inputs.get("SEND_URL", None):
         status_update_options.update({"SEND_URL": call_inputs.get("SEND_URL")})
@@ -208,6 +167,36 @@ async def inference(all_inputs: dict, response) -> dict:
         # Start the timer to send status updates
         Timer(1.0, sendStatus).start()
 
+    return status_update_options
+
+
+last_attn_procs = None
+last_lora_weights = None
+cross_attention_kwargs = None
+
+
+# This function is used to perform inference (or training!) on the model with the provided inputs.
+# It's run with every server call.
+# It's an asynchronous function, meaning it's designed to handle multiple requests at the same time.
+async def inference(all_inputs: dict, response) -> dict:
+    global model
+    global last_model_filename
+    global last_attn_procs
+    global last_lora_weights
+    global cross_attention_kwargs
+
+    initialize_session()  # Start new session since starting a new inference
+    print(json.dumps(truncateInputs(all_inputs), indent=2))  # Print the inputs for debugging purposes
+
+    # Extract model inputs and call inputs from the all_inputs dictionary
+    model_inputs = all_inputs.get("modelInputs", None)
+    call_inputs = all_inputs.get("callInputs", None)
+
+    result = {"$meta": {}}  # Initialize the result dictionary
+
+    # Prepare options for status update, including the URL to send the status updates to
+    status_update_options = prepare_status_update_options(call_inputs, response)
+
     # If either model inputs or call inputs are missing, return an error
     if model_inputs == None or call_inputs == None:
         return {
@@ -229,11 +218,7 @@ async def inference(all_inputs: dict, response) -> dict:
             return {
                 "$error": {
                     "code": "NO_SUCH_EXTRA",
-                    "message": 'Requested "'
-                    + use_extra
-                    + '", available: "'
-                    + '", "'.join(extras.keys())
-                    + '"',
+                    "message": f'Requested "{use_extra}", available: "{", ".join(extras.keys())}"',
                 }
             }
         return await extra(
@@ -257,8 +242,8 @@ async def inference(all_inputs: dict, response) -> dict:
         # Update metadata with the new model ID
         result["$meta"].update({"MODEL_ID": MODEL_ID})
 
-    # Use the model ID as the normalized model ID by default
-    normalized_model_id = model_id
+    # Create the filename for the model
+    model_filename = get_model_filename(model_id, MODEL_REVISION)
 
     # If runtime downloads are enabled, download the model and related files
     if RUNTIME_DOWNLOADS:
@@ -269,35 +254,28 @@ async def inference(all_inputs: dict, response) -> dict:
         checkpoint_url = call_inputs.get("CHECKPOINT_URL", None)
         checkpoint_config_url = call_inputs.get("CHECKPOINT_CONFIG_URL", None)
 
-        # Normalize the model ID
-        normalized_model_id = normalize_model_id(model_id, model_revision)
-
-        # Define the directory where the model should be stored
-        model_dir = os.path.join(MODELS_DIR, normalized_model_id)
+        # Get the path for the model (where it may already be cached, or where it will be downloaded to)
+        model_dir = os.path.join(MODELS_DIR, model_filename)
 
         # Extract the pipeline name from the call inputs, and get the corresponding pipeline class
         pipeline_name = call_inputs.get("PIPELINE", None)
         if pipeline_name:
             pipeline_class = getPipelineClass(pipeline_name)
 
-        # If the last model ID is not the same as the new normalized model ID, download and load the new model
-        if last_model_id != normalized_model_id:
-            # If the model is not on disk in the expected location, download it
-            if not os.path.isdir(model_dir):
-                model_url = call_inputs.get("MODEL_URL", None)
-                if not model_url:
-                    normalized_model_id = hf_model_id or model_id
-                await download_model(
-                    model_id=model_id,
-                    model_url=model_url,
-                    model_revision=model_revision,
-                    checkpoint_url=checkpoint_url,
-                    checkpoint_config_url=checkpoint_config_url,
-                    hf_model_id=hf_model_id,
-                    model_precision=model_precision,
-                    status_update_options=status_update_options,
-                    pipeline_class=pipeline_class if pipeline_name else None,
-                )
+        # If the new model filename is not the same as the last one, and it's not already on disk, download and load the new model
+        if model_filename != last_model_filename and not os.path.isdir(model_dir):
+            model_url = call_inputs.get("MODEL_URL", None)
+            await download_model(
+                model_id=model_id,
+                model_url=model_url,
+                model_revision=model_revision,
+                checkpoint_url=checkpoint_url,
+                checkpoint_config_url=checkpoint_config_url,
+                hf_model_id=hf_model_id,
+                model_precision=model_precision,
+                status_update_options=status_update_options,
+                pipeline_class=pipeline_class if pipeline_name else None,
+            )
 
             # Clear the pipeline cache when changing the loaded model, as pipelines include references to the model and would
             # therefore prevent memory being reclaimed after unloading the previous model.
@@ -307,7 +285,6 @@ async def inference(all_inputs: dict, response) -> dict:
             cross_attention_kwargs = None
 
             # If a model is already loaded, move it to the CPU to avoid a memory leak
-            # TODO ESS: Understand why this works
             if model:
                 model.to("cpu")
 
@@ -316,7 +293,7 @@ async def inference(all_inputs: dict, response) -> dict:
             # Load the model
             model = await asyncio.to_thread(
                 loadModel,
-                model_id=normalized_model_id,
+                model_id=model_id,
                 load=True,
                 precision=model_precision,
                 revision=model_revision,
@@ -325,28 +302,21 @@ async def inference(all_inputs: dict, response) -> dict:
             )
 
             await send_status_update("loadModel", "done", {"startRequestId": startRequestId}, status_update_options)
-            last_model_id = normalized_model_id
+            last_model_filename = model_filename
             last_attn_procs = None
             last_lora_weights = None
-    else:
-        # If runtime downloads are not enabled, use the model that was loaded at init time.
-        # TODO ESS: what is always_normalize_model_id, and why is it needed? Was added in commit "https://github.com/kiri-art/docker-diffusers-api/commit/caa7d749d707e688ed1e4935a00ba6c9efdf2537"
-        if always_normalize_model_id:
-            normalized_model_id = always_normalize_model_id
-        print(
-            {
-                "always_normalize_model_id": always_normalize_model_id,
-                "normalized_model_id": normalized_model_id,
-            }
-        )
 
-    # If the model ID is set to "ALL", load the model with the normalized model ID
     if MODEL_ID == "ALL":
-        if last_model_id != normalized_model_id:
+        if model_filename != last_model_filename:
             clearPipelines()
             cross_attention_kwargs = None
-            model = loadModel(normalized_model_id, status_update_options=status_update_options)
-            last_model_id = normalized_model_id
+            model = loadModel(
+                model_id,
+                load=True,
+                precision=model_precision,
+                revision=model_revision,
+                status_update_options=status_update_options)
+            last_model_filename = model_filename
     else:
         # Make sure the requested model is the one we have (if runtime downloads are not enabled)
         if model_id != MODEL_ID and not RUNTIME_DOWNLOADS:
@@ -371,7 +341,7 @@ async def inference(all_inputs: dict, response) -> dict:
         pipeline = getPipelineForModel(
             pipeline_name,
             model,
-            normalized_model_id,
+            model_id,
             model_revision=model_revision if RUNTIME_DOWNLOADS else MODEL_REVISION,
             model_precision=model_precision if RUNTIME_DOWNLOADS else MODEL_PRECISION,
         )
@@ -395,7 +365,7 @@ async def inference(all_inputs: dict, response) -> dict:
         result["$meta"].update({"SCHEDULER": scheduler_name})
 
     # Get the scheduler for the model
-    pipeline.scheduler = getScheduler(normalized_model_id, scheduler_name)
+    pipeline.scheduler = getScheduler(model_id, scheduler_name)
     if pipeline.scheduler == None:
         return {
             "$error": {
@@ -563,22 +533,19 @@ async def inference(all_inputs: dict, response) -> dict:
                 }
             }
 
-        # If runtime downloads are enabled and the model directory exists, set the normalized_model_id to the model directory
-        if RUNTIME_DOWNLOADS:
-            if os.path.isdir(model_dir):
-                normalized_model_id = model_dir
-
         # Enable gradient computation in PyTorch for training (it's disabled by default for inference since it's memory-intensive)
         torch.set_grad_enabled(True)
 
         # Run the TrainDreamBooth function in a separate thread and merge its result with the existing result dictionary
         result = result | await asyncio.to_thread(
             TrainDreamBooth,
-            normalized_model_id,
+            model_id,
             pipeline,
             model_inputs,
             call_inputs,
             status_update_options=status_update_options,
+            revision=model_revision,
+            variant=model_precision,
         )
 
         # Disable gradient computation in PyTorch after training
