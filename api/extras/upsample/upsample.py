@@ -16,7 +16,7 @@ from gfpgan import GFPGANer
 from .models import models_by_type, upsamplers, face_enhancers
 from status import status
 from utils import Storage
-from send import send_status_update
+from status_update import send_status_update
 
 print(
     {

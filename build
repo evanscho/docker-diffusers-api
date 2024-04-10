@@ -6,6 +6,6 @@
 # An additional tag (commented out) can be used for testing: evanscho/diffusers-api-3:test
 
 # DOCKER_BUILDKIT=1 BUILDKIT_PROGRESS=plain \
-  docker build --progress=plain --no-cache \
+  docker build --progress=plain \
   -t evanscho/diffusers-api-3:3 \
   "$@" .

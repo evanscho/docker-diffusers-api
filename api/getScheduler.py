@@ -32,7 +32,7 @@ def initScheduler(model_id: str, scheduler_id: str, download=False):
     inittedScheduler = scheduler.from_pretrained(
         model_dir or model_id,
         subfolder="scheduler",
-        use_auth_token=HF_AUTH_TOKEN,
+        token=HF_AUTH_TOKEN,
         local_files_only=not download,
     )
     diff = round((time.time() - start) * 1000)

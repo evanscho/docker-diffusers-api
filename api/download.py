@@ -23,7 +23,7 @@ Path(MODELS_DIR).mkdir(parents=True, exist_ok=True)
 # i.e. don't run during build
 async def send_status_update(process_name: str, status: str, payload: dict = {}, options: dict = {}):
     if RUNTIME_DOWNLOADS:
-        from send import send_status_update as _send_status_update
+        from status_update import send_status_update as _send_status_update
 
         await _send_status_update(process_name, status, payload, options)
 

@@ -84,7 +84,7 @@ def loadModel(
         model_dir or model_id,
         revision=revision,
         torch_dtype=torch_dtype,
-        use_auth_token=HF_AUTH_TOKEN,
+        token=HF_AUTH_TOKEN,
         scheduler=scheduler,
         local_files_only=load,
     )

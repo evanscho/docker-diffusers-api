@@ -84,5 +84,6 @@ EXPOSE 8000
 ARG SAFETENSORS_FAST_GPU=1
 ENV SAFETENSORS_FAST_GPU=${SAFETENSORS_FAST_GPU}
 
-CMD sanic server:app --host=0.0.0.0 --port=8000 --single-process --debug 2>&1 | tee training.log   # old CMD: python3 -u server.py (was giving errors in newer Sanic)
+# Server providers like Runpod offer the ability to overwrite the CMD to add things like SSH, so may need to copy this there.
+CMD ["sanic", "server:app", "--host=0.0.0.0", "--port=8000", "--single-process", "--debug --access-logs"]   # old CMD: python3 -u server.py (was giving errors in newer Sanic)
 

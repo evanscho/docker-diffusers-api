@@ -68,7 +68,7 @@ from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_
 from diffusers.utils.torch_utils import is_compiled_module
 
 # DDA
-from send import send_status_update as _send_status_update
+from status_update import send_status_update as _send_status_update
 from utils import Storage
 import subprocess
 import re

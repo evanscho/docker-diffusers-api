@@ -7,7 +7,7 @@ from io import BytesIO
 import PIL
 import json
 from loadModel import loadModel
-from send import send_status_update, get_process_durations, initialize_session
+from status_update import send_status_update, get_process_durations, initialize_session
 from status import status
 import os
 import numpy as np

@@ -9,6 +9,13 @@ import app as user_src
 import traceback
 import os
 import json
+import sys
+from utils.logging import Tee
+
+# Open the log file and create a Tee object that writes to both the log file and stdout/stderr
+log_file = open('training.log', 'a')
+sys.stdout = Tee(log_file, sys.stdout)
+sys.stderr = Tee(log_file, sys.stderr)
 
 # We do the model load-to-GPU step on server startup
 # so the model object is available globally for reuse
@@ -19,10 +26,12 @@ app = Sanic("my_app")
 app.config.CORS_ORIGINS = os.getenv("CORS_ORIGINS") or "*"
 app.config.RESPONSE_TIMEOUT = 60 * 60  # 1 hour (training can be long)
 
-# Healthchecks verify that the environment is correct on Banana Serverless
+
 @app.route("/healthcheck", methods=["GET"])
 def healthcheck(request):
-    # dependency free way to check if GPU is visible
+    # Healthchecks verify that the environment is correct on Banana Serverless
+
+    # Dependency-free way to check if GPU is visible
     gpu = False
     out = subprocess.run("nvidia-smi", shell=True)
     if out.returncode == 0:  # success state on shell command
@@ -31,9 +40,10 @@ def healthcheck(request):
     return response.json({"state": "healthy", "gpu": gpu})
 
 
-# Inference POST handler at '/' is called for every http call from Banana
 @app.route("/", methods=["POST"])
 async def inference(request):
+    # Inference POST handler at '/' is called for every http call from Banana
+
     try:
         all_inputs = response.json.loads(request.json)
     except:
@@ -66,4 +76,5 @@ async def inference(request):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port="8000", single_process=True)  # ESS: formerly was workers=1, which was leading to a multiprocessing bug
+    # ESS: formerly had workers=1, which was leading to a multiprocessing bug
+    app.run(host="0.0.0.0", port="8000", single_process=True, debug=True, access_log=True)
