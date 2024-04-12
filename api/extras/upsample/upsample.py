@@ -14,7 +14,6 @@ from realesrgan.archs.srvgg_arch import SRVGGNetCompact
 from gfpgan import GFPGANer
 
 from .models import models_by_type, upsamplers, face_enhancers
-from status import status
 from utils import Storage
 from status_update import send_status_update
 
@@ -37,7 +36,9 @@ async def assert_model_exists(src, filename, status_update_options, opts={}):
     dest = cache_path(filename) if not opts.get("absolutePath", None) else filename
     if not os.path.exists(dest):
         await send_status_update("download", "start", {}, status_update_options)
-        storage = Storage(src, status=status)
+        status_instance = status_update_options.get("status_instance", None)
+        if status_instance:
+            storage = Storage(src, status=status_instance)
         # await storage.download_file(dest)
         await asyncio.to_thread(storage.download_file, dest)
         await send_status_update("download", "done", {}, status_update_options)

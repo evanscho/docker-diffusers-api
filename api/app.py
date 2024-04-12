@@ -8,7 +8,7 @@ import PIL
 import json
 from loadModel import loadModel
 from status_update import send_status_update, get_process_durations, initialize_session
-from status import status
+from status import Status, StatusSender
 import os
 import numpy as np
 import skimage
@@ -60,24 +60,23 @@ if os.environ.get("USE_PATCHMATCH") == "1":
 torch.set_grad_enabled(False)
 
 
-# Init is run on server startup
-# Load your model to GPU as a global variable here using the variable name "model"
-def init():
+async def init():
+    """Init is run on server startup"""
+    # Load your model to GPU as a global variable here using the variable name "model"
     global model  # needed for banana optimizations; TODO ESS: remove this line and subsequent uses until its re-instantiation in inference()
 
     # Send a status update indicating that the initialization has started
-    asyncio.run(
-        send_status_update(
-            "init",
-            "start",
-            {
-                "device": device_name,
-                # HOSTNAME is set automatically in Linux; in a container it's the container's ID
-                "hostname": os.getenv("HOSTNAME"),
-                "model_id": MODEL_ID,
-                "diffusers": __version__,
-            },
-        )
+
+    await send_status_update(
+        "init",
+        "start",
+        {
+            "device": device_name,
+            # HOSTNAME is set automatically in Linux; in a container it's the container's ID
+            "hostname": os.getenv("HOSTNAME"),
+            "model_id": MODEL_ID,
+            "diffusers": __version__,
+        },
     )
 
     global last_model_filename
@@ -95,29 +94,26 @@ def init():
         model = None
 
     # Send a status update indicating that the initialization is done
-    asyncio.run(send_status_update("init", "done"))
-
-# Function to decode a base64-encoded image
+    await send_status_update("init", "done")
 
 
 def decodeBase64Image(imageStr: str, name: str) -> PIL.Image:
+    """Function to decode a base64-encoded image"""
     image = PIL.Image.open(BytesIO(base64.decodebytes(bytes(imageStr, "utf-8"))))
     print(f'Decoded image "{name}": {image.format} {image.width}x{image.height}')
     return image
 
-# Function to download an image from a URL
-
 
 def getFromUrl(url: str, name: str) -> PIL.Image:
+    """Function to download an image from a URL"""
     response = requests.get(url)
     image = PIL.Image.open(BytesIO(response.content))
     print(f'Decoded image "{name}": {image.format} {image.width}x{image.height}')
     return image
 
-# Function to truncate inputs to a manageable size for logging or debugging
-
 
 def truncateInputs(inputs: dict):
+    """Function to truncate inputs to a manageable size for logging or debugging"""
     inputs_copy = inputs.copy()
     if "modelInputs" in inputs_copy:
         # Create a shallow copy of the modelInputs dictionary since even with the shalow copy of 'inputs',
@@ -134,16 +130,15 @@ def truncateInputs(inputs: dict):
             )
     return inputs_copy
 
-# TODO, move to device.py
-
 
 def calculate_memory_usage():
+    # TODO: move to device.py
     if torch.cuda.is_available():
         return torch.cuda.memory_allocated() / torch.cuda.max_memory_allocated()
     return 0
 
 
-def prepare_status_update_options(call_inputs, response):
+async def prepare_status_update_options(call_inputs, response):
     status_update_options = {}
     if call_inputs.get("SEND_URL", None):
         status_update_options.update({"SEND_URL": call_inputs.get("SEND_URL")})
@@ -152,20 +147,15 @@ def prepare_status_update_options(call_inputs, response):
     if response:
         status_update_options.update({"response": response})
 
-        # Define an asynchronous function to send status updates
-        async def sendStatusAsync():
-            await response.send(json.dumps(status.get()) + "\n")
+        # Start the timer to send status updates every second
+        status_instance = Status()
+        status_sender = StatusSender(status_instance, response)
+        await status_sender.send_status(1)
 
-        # Define a function to run the asynchronous status update function and schedule it to run every second
-        def sendStatus():
-            try:
-                asyncio.run(sendStatusAsync())
-                Timer(1.0, sendStatus).start()
-            except:
-                pass
-
-        # Start the timer to send status updates
-        Timer(1.0, sendStatus).start()
+        # Add the status instance and status updater to the status update options
+        status_update_options.update({"status_instance": status_instance})
+        status_update_options.update({"status_sender": status_sender})
+        status_update_options.update({"event_loop": asyncio.get_event_loop()})
 
     return status_update_options
 
@@ -195,7 +185,8 @@ async def inference(all_inputs: dict, response) -> dict:
     result = {"$meta": {}}  # Initialize the result dictionary
 
     # Prepare options for status update, including the URL to send the status updates to
-    status_update_options = prepare_status_update_options(call_inputs, response)
+    status_update_options = await prepare_status_update_options(call_inputs, response)
+    status_instance = status_update_options.get("status_instance", None)
 
     # If either model inputs or call inputs are missing, return an error
     if model_inputs == None or call_inputs == None:
@@ -390,7 +381,7 @@ async def inference(all_inputs: dict, response) -> dict:
 
     # Extract the textual inversions from the call inputs and load them if necessary
     textual_inversions = call_inputs.get("textual_inversions", [])
-    await handle_textual_inversions(textual_inversions, model, status=status)
+    await handle_textual_inversions(textual_inversions, model, status=status_instance)
 
     # TODO: Currently we only support a single string, but we should allow
     # an array too in anticipation of multi-LoRA support in diffusers
@@ -419,7 +410,7 @@ async def inference(all_inputs: dict, response) -> dict:
         if len(lora_weights) > 0:
             for weights in lora_weights:
                 # Create a storage object for the weights
-                storage = Storage(weights, no_raise=True, status=status)
+                storage = Storage(weights, no_raise=True, status=status_instance)
                 if storage:
                     # Get the filename and scale from the storage query
                     storage_query_fname = storage.query.get("fname")
@@ -537,6 +528,7 @@ async def inference(all_inputs: dict, response) -> dict:
         torch.set_grad_enabled(True)
 
         # Run the TrainDreamBooth function in a separate thread and merge its result with the existing result dictionary
+
         result = result | await asyncio.to_thread(
             TrainDreamBooth,
             model_id,
@@ -579,14 +571,13 @@ async def inference(all_inputs: dict, response) -> dict:
     # If the user wants a progress message for each step, create a callback function to do so
     if model_inputs.get("callback_steps", None):
         def callback(step: int, timestep: int, callback_kwargs: dict):
-            asyncio.run(
-                send_status_update(
-                    "inference",
-                    "progress",
-                    {"startRequestId": startRequestId, "step": step},
-                    status_update_options,
-                )
+            coroutine = send_status_update(
+                "inference",
+                "progress",
+                {"startRequestId": startRequestId, "step": step},
+                status_update_options,
             )
+            asyncio.run_coroutine_threadsafe(coroutine, asyncio.get_event_loop())
     else:
         # Otherwise, have the callback function just update the status for each step
         vae = pipeline.vae
@@ -594,16 +585,11 @@ async def inference(all_inputs: dict, response) -> dict:
         image_processor = pipeline.image_processor
 
         def callback(step: int, timestep: int, callback_kwargs: dict):
-            status.update(
-                "inference", step / model_inputs.get("num_inference_steps", 50)
-            )
-
-    print(
-        {
-            "callback_on_step_end": callback,
-            "**model_inputs": model_inputs,
-        },
-    )
+            if status_instance:
+                status_instance.update(
+                    "inference", step / model_inputs.get("num_inference_steps", 50)
+                )
+    print({"callback_on_step_end": callback, "**model_inputs": model_inputs})
 
     # Check if the model is a StableDiffusionXL pipeline
     is_sdxl = (

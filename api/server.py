@@ -5,26 +5,30 @@
 
 from sanic import Sanic, response
 import subprocess
-import app as user_src
+import app as diffusers_model
 import traceback
 import os
 import json
 import sys
 from utils.logging import Tee
+import logging
 
 # Open the log file and create a Tee object that writes to both the log file and stdout/stderr
 log_file = open('training.log', 'a')
 sys.stdout = Tee(log_file, sys.stdout)
 sys.stderr = Tee(log_file, sys.stderr)
 
-# We do the model load-to-GPU step on server startup
-# so the model object is available globally for reuse
-user_src.init()
-
 # Create the http server app
 app = Sanic("my_app")
 app.config.CORS_ORIGINS = os.getenv("CORS_ORIGINS") or "*"
 app.config.RESPONSE_TIMEOUT = 60 * 60  # 1 hour (training can be long)
+
+
+@app.before_server_start
+async def initialize(app, loop):
+    # We do the model load-to-GPU step on server startup
+    # so the model object is available globally for reuse
+    await diffusers_model.init()
 
 
 @app.route("/healthcheck", methods=["GET"])
@@ -57,14 +61,15 @@ async def inference(request):
         streaming_response = await request.respond(content_type="application/x-ndjson")
 
     try:
-        output = await user_src.inference(all_inputs, streaming_response)
-    except Exception as err:
-        print(err)
+        output = await diffusers_model.inference(all_inputs, streaming_response)
+    except Exception as exception:
+        logging.exception(exception)
+
         output = {
             "$error": {
                 "code": "APP_INFERENCE_ERROR",
-                "name": type(err).__name__,
-                "message": str(err),
+                "name": type(exception).__name__,
+                "message": str(exception),
                 "stack": traceback.format_exc(),
             }
         }

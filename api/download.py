@@ -4,11 +4,10 @@
 import os
 from loadModel import loadModel, MODEL_IDS
 from utils import Storage
-import subprocess
 from pathlib import Path
 from convert_to_diffusers import main as convert_to_diffusers
 from download_checkpoint import main as download_checkpoint
-from status import status
+from status import Status
 import asyncio
 
 USE_DREAMBOOTH = os.environ.get("USE_DREAMBOOTH")
@@ -76,8 +75,11 @@ async def download_model(
         model_file = os.path.join(MODELS_DIR, filename)
 
         # Create an appropriate Storage object for the model, depending on whether the URL is for S3 or HTTP
+        status_instance = status_update_options.get("status_instance", None)
+        if not status_instance:
+            status_instance = Status()
         storage = Storage(
-            model_url, default_path=model_filename + ".tar.zst", status=status
+            model_url, default_path=model_filename + ".tar.zst", status=status_instance
         )
 
         # If the model exists in S3, download and extract it

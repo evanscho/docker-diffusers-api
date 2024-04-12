@@ -80,7 +80,8 @@ HF_AUTH_TOKEN = os.getenv("HF_AUTH_TOKEN")
 
 
 def send_status_update(process_name: str, status: str, payload: dict = {}, options: dict = {}):
-    asyncio.run((_send_status_update(process_name, status, payload, options)))
+    event_loop = options.get("event_loop", None) or asyncio.get_event_loop()
+    asyncio.run_coroutine_threadsafe(_send_status_update(process_name, status, payload, options))
 
 
 def TrainDreamBooth(model_id: str, pipeline, model_inputs, call_inputs, status_update_options, revision=None, variant=None):
@@ -113,7 +114,7 @@ def TrainDreamBooth(model_id: str, pipeline, model_inputs, call_inputs, status_u
         "train_batch_size": 1,  # DDA, was: 4
         "sample_batch_size": 1,  # DDA, was: 4,
         "num_train_epochs": 1,
-        "max_train_steps": 800,  # DDA, was: None,
+        "max_train_steps": 200,  # DDA, was: None,
         # Save a checkpoint of the training state every X updates. Checkpoints can be used for resuming training via `--resume_from_checkpoint`.
         # In the case that the checkpoint is better than the final trained model, the checkpoint can also be used for inference.
         # Using a checkpoint for inference requires separate loading of the original pipeline and the individual checkpointed model components.
@@ -642,6 +643,8 @@ def main(args, init_pipeline, status_update_options):  # DDA
 
     logging_dir = Path(args.output_dir, args.logging_dir)
 
+    status_instance = status_update_options.get("status_instance", None)
+
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
 
     accelerator = Accelerator(
@@ -1049,6 +1052,8 @@ def main(args, init_pipeline, status_update_options):  # DDA
 
     # DDA
     send_status_update("training", "start", {}, status_update_options)
+    if status_instance:
+        status_instance.update("training", 1000)
 
     for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
@@ -1168,6 +1173,8 @@ def main(args, init_pipeline, status_update_options):  # DDA
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
+                if status_instance:
+                    status_instance.update("training", global_step/args.max_train_steps)
                 global_step += 1
 
                 if accelerator.is_main_process:
@@ -1224,6 +1231,12 @@ def main(args, init_pipeline, status_update_options):  # DDA
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     send_status_update("training", "done", {}, status_update_options)  # DDA
+
+    # ESS: Stop the status updates, since we're done training and uploading to the Hugging Face Hub doesn't give status updates
+    status_sender = status_update_options.get("status_sender", None)
+    if status_sender:
+        status_sender.stop()
+
     if accelerator.is_main_process:
         pipeline_args = {}
 
@@ -1275,15 +1288,11 @@ def main(args, init_pipeline, status_update_options):  # DDA
                 # ESS: added "logs/*" to avoid BadRequestError due to adding HF secrets to the HF repository
                 ignore_patterns=["step_*", "epoch_*", "logs/*"],
                 token=args.hub_token  # ESS: without this, get 401 RepositoryNotFoundError if didn't create new repo, since we were only passing the token in create_repo
-                # DDA
-                # https://github.com/huggingface/huggingface_hub/blob/main/src/huggingface_hub/hf_api.py#L3379
-                # Whether or not to run this method in the background. Background jobs are run sequentially without
-                # blocking the main thread. Passing `run_as_future=True` will return a [Future](https://docs.python.org/3/library/concurrent.futures.html#future-objects)
-                # object. Defaults to `False`.
-                # run_as_future: TODO
+                # run_as_future: DDA TODO Whether or not to run this method in the background
+                # ESS TODO: even though there's no callback in upload_folder, get status by converting stdout to json
             )
 
-            send_status_update("upload", "done", {}, status_update_options)  # DDA
+        send_status_update("upload", "done", {}, status_update_options)  # DDA
 
     accelerator.end_training()
 
