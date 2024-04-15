@@ -23,6 +23,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 
+from utils.logging import Tee
+import sys
+import threading
+import io
 import argparse
 import copy
 import gc
@@ -33,6 +37,7 @@ import math
 import os
 import shutil
 import warnings
+import time
 from pathlib import Path
 
 import numpy as np
@@ -81,7 +86,7 @@ HF_AUTH_TOKEN = os.getenv("HF_AUTH_TOKEN")
 
 def send_status_update(process_name: str, status: str, payload: dict = {}, options: dict = {}):
     event_loop = options.get("event_loop", None) or asyncio.get_event_loop()
-    asyncio.run_coroutine_threadsafe(_send_status_update(process_name, status, payload, options))
+    asyncio.run_coroutine_threadsafe(_send_status_update(process_name, status, payload, options), event_loop)
 
 
 def TrainDreamBooth(model_id: str, pipeline, model_inputs, call_inputs, status_update_options, revision=None, variant=None):
@@ -805,14 +810,15 @@ def main(args, init_pipeline, status_update_options):  # DDA
             # pop models so that they are not loaded again
             model = models.pop()
 
-            if isinstance(model, type(unwrap_model(text_encoder))):
-                # load transformers style into model
-                load_model = text_encoder_cls.from_pretrained(input_dir, subfolder="text_encoder")
-                model.config = load_model.config
-            else:
-                # load diffusers style into model
-                load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
-                model.register_to_config(**load_model.config)
+            # if isinstance(model, type(unwrap_model(text_encoder))):
+            #     # load transformers style into model
+            #     load_model = text_encoder_cls.from_pretrained(input_dir, subfolder="text_encoder")
+            #     model.config = load_model.config
+            # else:
+
+            # load diffusers style into model
+            load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
+            model.register_to_config(**load_model.config)
 
             # DDA
             # model.load_state_dict(load_model.state_dict())
@@ -1232,11 +1238,6 @@ def main(args, init_pipeline, status_update_options):  # DDA
     accelerator.wait_for_everyone()
     send_status_update("training", "done", {}, status_update_options)  # DDA
 
-    # ESS: Stop the status updates, since we're done training and uploading to the Hugging Face Hub doesn't give status updates
-    status_sender = status_update_options.get("status_sender", None)
-    if status_sender:
-        status_sender.stop()
-
     if accelerator.is_main_process:
         pipeline_args = {}
 
@@ -1271,32 +1272,106 @@ def main(args, init_pipeline, status_update_options):  # DDA
         pipeline.save_pretrained(args.output_dir, safe_serialization=True)  # DDA
 
         if args.push_to_hub:
-            send_status_update("upload", "start", {}, status_update_options)  # DDA
-            save_model_card(
-                repo_id,
-                images=images,
-                base_model=args.pretrained_model_name_or_path,
-                train_text_encoder=args.train_text_encoder,
-                prompt=args.instance_prompt,
-                repo_folder=args.output_dir,
-                pipeline=pipeline,
-            )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                # ESS: added "logs/*" to avoid BadRequestError due to adding HF secrets to the HF repository
-                ignore_patterns=["step_*", "epoch_*", "logs/*"],
-                token=args.hub_token  # ESS: without this, get 401 RepositoryNotFoundError if didn't create new repo, since we were only passing the token in create_repo
-                # run_as_future: DDA TODO Whether or not to run this method in the background
-                # ESS TODO: even though there's no callback in upload_folder, get status by converting stdout to json
-            )
+            upload_to_huggingface(repo_id, images, pipeline, args, status_update_options)
 
         send_status_update("upload", "done", {}, status_update_options)  # DDA
 
     accelerator.end_training()
 
     return {"done": True}  # DDA
+
+
+def upload_to_huggingface(repo_id, images, pipeline, args, status_update_options):  # DDA
+    send_status_update("upload", "start", {}, status_update_options)  # DDA
+    save_model_card(
+        repo_id,
+        images=images,
+        base_model=args.pretrained_model_name_or_path,
+        train_text_encoder=args.train_text_encoder,
+        prompt=args.instance_prompt,
+        repo_folder=args.output_dir,
+        pipeline=pipeline,
+    )
+    perform_upload({
+        "repo_id": repo_id,
+        "folder_path": args.output_dir,
+        "commit_message": "End of training",
+        # ESS: "logs/*" to avoid BadRequestError (adding HF secrets to HF repository)
+        "ignore_patterns": ["step_*", "epoch_*", "logs/*"],
+        "token": args.hub_token,   # ESS: without this, get 401 RepositoryNotFoundError if didn't create new repo, since we were only passing the token in create_repo
+        # run_as_future: DDA TODO Whether or not to run this method in the background
+    }, status_update_options)
+
+
+def monitor_stderr(stderr_output, upload_thread, status_update_options):
+    try:
+        status_instance = status_update_options.get("status_instance", None)
+        last_position = 0  # Keep track of the last read position
+
+        while True:
+            stderr_output.seek(last_position)  # Move to the last read position
+            all_content = stderr_output.read()  # Read new content since last read
+            if all_content:
+                lines = all_content.splitlines()
+                if lines:
+                    last_line = lines[-1]
+                    progress = parse_progress(last_line)
+                    if progress is not None:
+                        status_instance.update("upload", progress)
+                last_position = stderr_output.tell()  # Update the position after reading
+
+            if not upload_thread.is_alive():
+                print('Exiting monitoring thread as upload thread has finished')
+                break  # Exit if the upload thread has finished
+
+            time.sleep(1)  # Sleep to wait for more data
+
+    except Exception as e:
+        print('Unhandling exception in monitoring stderr:', e)
+
+
+def parse_progress(output):
+    # Use regex to extract the progress
+    pattern = re.compile(r'(\d+(?:\.\d+)?)([kMG]?)/(\d+(?:\.\d+)?)([kMG]?)')
+    match = pattern.search(output)
+    if match:
+        current, current_unit, total, total_unit = match.groups()
+        # Convert to bytes for uniformity
+        current_bytes = convert_to_bytes(float(current), current_unit)
+        total_bytes = convert_to_bytes(float(total), total_unit)
+        progress = current_bytes / total_bytes if total_bytes > 0 else 0
+        return progress
+    return None
+
+
+def convert_to_bytes(number, unit):
+    unit_factors = {'': 1, 'k': 1024, 'M': 1024**2, 'G': 1024**3}
+    return number * unit_factors[unit]
+
+
+def perform_upload(upload_folder_kwargs, status_update_options):
+    transfer_progress_output = io.StringIO()
+    original_stderr = sys.stderr
+    if isinstance(sys.stderr, Tee):
+        sys.stderr.add_log_file(transfer_progress_output)
+    else:
+        sys.stderr = Tee(sys.stderr, transfer_progress_output)
+
+    upload_thread = threading.Thread(target=upload_folder, kwargs=upload_folder_kwargs)
+    upload_thread.start()
+
+    # Wait for a few seconds before starting the monitor thread so the upload thread can start more quickly
+    time.sleep(3)
+
+    monitor_thread = threading.Thread(target=monitor_stderr, args=(
+        transfer_progress_output, upload_thread, status_update_options))
+    monitor_thread.start()
+
+    upload_thread.join()
+    monitor_thread.join()
+
+    if isinstance(sys.stderr, Tee):
+        sys.stderr.remove_log_file(transfer_progress_output)
 
 # DDA
 # if __name__ == "__main__":

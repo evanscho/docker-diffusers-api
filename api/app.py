@@ -500,8 +500,6 @@ async def inference(all_inputs: dict, response) -> dict:
             )
         )
 
-    await send_status_update("inference", "start", {"startRequestId": startRequestId}, status_update_options)
-
     # Run patchmatch for inpainting
     if call_inputs.get("FILL_MODE", None) == "patchmatch":
         sel_buffer = np.array(model_inputs.get("init_image"))
@@ -543,15 +541,14 @@ async def inference(all_inputs: dict, response) -> dict:
         # Disable gradient computation in PyTorch after training
         torch.set_grad_enabled(False)
 
-        # Send a status update indicating that the inference is done
-        await send_status_update("inference", "done", {"startRequestId": startRequestId}, status_update_options)
-
         # Update the result dictionary with the timing and memory usage information
         mem_usage = calculate_memory_usage()
         result.update({"$timings": get_process_durations(), "$mem_usage": mem_usage})
 
         # Return the result now, since the training is done and we won't be doing inference in this same run
         return result
+
+    await send_status_update("inference", "start", {"startRequestId": startRequestId}, status_update_options)
 
     # Get the seed from the model inputs if it exists, and create a generator with it or with a random seed
     # Do this after dreambooth as dreambooth accepts a seed int directly.

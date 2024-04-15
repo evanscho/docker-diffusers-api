@@ -4,24 +4,31 @@
 # Instead, edit the init() and inference() functions in app.py
 
 from sanic import Sanic, response
+from sanic.exceptions import SanicException
+from sanic.response import json as json_response
+from sanic.log import logger
 import subprocess
 import app as diffusers_model
 import traceback
 import os
 import json
 import sys
+import time
 from utils.logging import Tee
 import logging
 
 # Open the log file and create a Tee object that writes to both the log file and stdout/stderr
 log_file = open('training.log', 'a')
-sys.stdout = Tee(log_file, sys.stdout)
-sys.stderr = Tee(log_file, sys.stderr)
+
+sys.stdout = Tee(sys.stdout, log_file)
+sys.stderr = Tee(sys.stderr, log_file)
 
 # Create the http server app
 app = Sanic("my_app")
 app.config.CORS_ORIGINS = os.getenv("CORS_ORIGINS") or "*"
-app.config.RESPONSE_TIMEOUT = 60 * 60  # 1 hour (training can be long)
+app.config.RESPONSE_TIMEOUT = 60 * 60  # 1 hour (training and uploading can be long)
+app.config.KEEP_ALIVE_TIMEOUT = 60 * 60  # for keeping the connection alive when streaming
+app.config.NOISY_EXCEPTIONS = True
 
 
 @app.before_server_start
@@ -29,6 +36,24 @@ async def initialize(app, loop):
     # We do the model load-to-GPU step on server startup
     # so the model object is available globally for reuse
     await diffusers_model.init()
+
+
+@app.middleware("request")
+async def log_request(request):
+    try:
+        request.ctx.start_time = time.time()
+        logger.info(f"Request started: {request.method} {request.url}")
+    except Exception as e:
+        logger.error(f"Error in request middleware: {str(e)}")
+
+
+@app.middleware("response")
+async def log_response(request, response):
+    try:
+        total_time = time.time() - request.ctx.start_time
+        logger.info(f"Request completed: {request.method} {request.url} in {total_time:.2f} seconds")
+    except Exception as e:
+        logger.error(f"Error in response middleware: {str(e)}")
 
 
 @app.route("/healthcheck", methods=["GET"])
@@ -41,43 +66,64 @@ def healthcheck(request):
     if out.returncode == 0:  # success state on shell command
         gpu = True
 
+    logger.info(f"Healthcheck performed with GPU check: {'available' if gpu else 'not available'}")
     return response.json({"state": "healthy", "gpu": gpu})
 
 
 @app.route("/", methods=["POST"])
 async def inference(request):
-    # Inference POST handler at '/' is called for every http call from Banana
-
     try:
-        all_inputs = response.json.loads(request.json)
-    except:
         all_inputs = request.json
+    except Exception as e:
+        logging.error("Invalid JSON received.")
+        return json_response({"error": "Invalid JSON received from user"}, status=400)
 
     call_inputs = all_inputs.get("callInputs", None)
     stream_events = call_inputs and call_inputs.get("streamEvents", 0) != 0
 
     streaming_response = None
-    if stream_events:
-        streaming_response = await request.respond(content_type="application/x-ndjson")
-
     try:
+        if stream_events:
+            streaming_response = await request.respond(content_type="application/x-ndjson")
+
         output = await diffusers_model.inference(all_inputs, streaming_response)
-    except Exception as exception:
-        logging.exception(exception)
+        if streaming_response:
+            await streaming_response.send(json.dumps(output) + "\n")
+        else:
+            return json_response(output)
+    except SanicException as e:
+        logging.error(f"Failed to send streaming response: {str(e)}")
+        return json_response({"error": "Server error"}, status=500)
+    except Exception as e:
+        return await handle_exception(streaming_response if stream_events else None, e)
 
-        output = {
-            "$error": {
-                "code": "APP_INFERENCE_ERROR",
-                "name": type(exception).__name__,
-                "message": str(exception),
-                "stack": traceback.format_exc(),
-            }
-        }
 
-    if stream_events:
-        await streaming_response.send(json.dumps(output) + "\n")
+async def handle_exception(stream, exception):
+    """Handle exceptions by sending an error message over a stream or returning it."""
+    streaming_string = "streaming " if stream else ""
+    logging.exception(f"Error during {streaming_string}inference processing.")
+
+    error_response = create_error_response(exception)
+    if stream:
+        error_response = json.dumps(error_response)
+        try:
+            await stream.send(error_response + "\n")
+        except SanicException as e:
+            logging.error(f"Failed to send error response after initial error: {str(e)}")
     else:
-        return response.json(output)
+        return json_response(error_response)
+
+
+def create_error_response(exception):
+    """Create a standardized error response JSON structure."""
+    return {
+        "$error": {
+            "code": "APP_INFERENCE_ERROR",
+            "name": type(exception).__name__,
+            "message": str(exception),
+            "stack": traceback.format_exc(),
+        }
+    }
 
 
 if __name__ == "__main__":

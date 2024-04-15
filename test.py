@@ -1,5 +1,4 @@
 # This file is used to verify your http server acts as expected
-# Run it with `python3 test.py``
 
 import requests
 import base64
@@ -7,39 +6,36 @@ import os
 import json
 import sys
 import time
-import datetime
 import argparse
-import distutils
-from uuid import uuid4
 from io import BytesIO
 from PIL import Image
-from pathlib import Path, PosixPath
+from pathlib import Path
 
-# path = os.path.dirname(os.path.realpath(sys.argv[0]))
+# Base directory can be changed to the path of the current Python script: os.path.realpath(sys.argv[0])
 path = "."
-TESTS = path + os.sep + "tests"
-FIXTURES = TESTS + os.sep + "fixtures"
-OUTPUT = TESTS + os.sep + "output"
+TESTS = Path(path) / "tests"
+FIXTURES = TESTS / "fixtures"
+OUTPUT = TESTS / "output"
 TEST_URL = os.environ.get("TEST_URL", "http://localhost:8000/")
-Path(OUTPUT).mkdir(parents=True, exist_ok=True)
+OUTPUT.mkdir(parents=True, exist_ok=True)
 
 
-def b64encode_file(filename: str):
-    path = (
-        filename
-        if isinstance(filename, PosixPath)
-        else os.path.join(FIXTURES, filename)
-    )
+# ================================
+# Utility and helper functions for tests
+# ================================
+
+def encode_in_base64(filename: str):
+    path = FIXTURES / filename if not isinstance(filename, Path) else filename
     with open(path, "rb") as file:
         return base64.b64encode(file.read()).decode("ascii")
 
 
 def output_path(filename: str):
-    return os.path.join(OUTPUT, filename)
+    return str(OUTPUT / filename)
 
 
-# https://stackoverflow.com/a/1094933/1839099
-def sizeof_fmt(num, suffix="B"):
+def readable_size_from_byte_size(num: float, suffix: str = "B"):
+    """Returns human-readable size from bytes size: https://stackoverflow.com/a/1094933/1839099"""
     for unit in ["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"]:
         if abs(num) < 1024.0:
             return f"{num:3.1f}{unit}{suffix}"
@@ -47,173 +43,106 @@ def sizeof_fmt(num, suffix="B"):
     return f"{num:.1f}Yi{suffix}"
 
 
-def decode_and_save(image_byte_string: str, name: str):
-    image_encoded = image_byte_string.encode("utf-8")
-    image_bytes = BytesIO(base64.b64decode(image_encoded))
-    image = Image.open(image_bytes)
-    fp = output_path(name + ".png")
-    image.save(fp)
-    print("Saved " + fp)
-    size_formatted = sizeof_fmt(os.path.getsize(fp))
-
-    return (
-        f"[{image.width}x{image.height} {image.format} image, {size_formatted} bytes]"
-    )
+def decode_base64_image_and_save(image_byte_string: str, name: str):
+    image_bytes = base64.b64decode(image_byte_string.encode("utf-8"))
+    image = Image.open(BytesIO(image_bytes))
+    file_path = output_path(f"{name}.png")
+    image.save(file_path)
+    print(f"Saved {file_path}")
+    size_formatted = readable_size_from_byte_size(file_path.stat().st_size)
+    return f"[{image.width}x{image.height} {image.format} image, {size_formatted} bytes]"
 
 
-all_tests = {}
+def process_inputs_for_logging(input_value, key):
+    # Check if the input is a dictionary and recursively process each value
+    if isinstance(input_value, dict):  # for modelInputs and callInputs
+        return {k: process_inputs_for_logging(v, k) for k, v in input_value.items()}
+    # Check if the input is a list called 'instance_images'
+    elif key == "instance_images" and isinstance(input_value, list):
+        return f"[Array({len(input_value)})]"
+    # Check for image data encoded in base64 format
+    elif key in ["init_image", "image"] and isinstance(input_value, str):
+        return "[image]"
+    return input_value
 
 
-def test(name, inputs):
-    global all_tests
-    all_tests.update({name: inputs})
-
-
-def runTest(name, args, extraCallInputs, extraModelInputs):
-    origInputs = all_tests.get(name)
-    inputs = {
-        "modelInputs": origInputs.get("modelInputs", {}).copy(),
-        "callInputs": origInputs.get("callInputs", {}).copy(),
-    }
-    inputs.get("callInputs").update(extraCallInputs)
-    inputs.get("modelInputs").update(extraModelInputs)
-
-    print("Running test: " + name)
-
-    inputs_to_log = {
-        "modelInputs": inputs["modelInputs"].copy(),
-        "callInputs": inputs["callInputs"].copy(),
-    }
-    model_inputs_to_log = inputs_to_log["modelInputs"]
-
-    for key in ["init_image", "image"]:
-        if key in model_inputs_to_log:
-            model_inputs_to_log[key] = "[image]"
-
-    instance_images = model_inputs_to_log.get("instance_images", None)
-    if instance_images:
-        model_inputs_to_log["instance_images"] = f"[Array({len(instance_images)})]"
-
-    print(json.dumps(inputs_to_log, indent=4))
+def log_inputs(inputs):
+    inputs_to_log = json.dumps({k: process_inputs_for_logging(v, k) for k, v in inputs.items()}, indent=4)
+    print(inputs_to_log)
     print()
 
-    start = time.time()
-    if args.get("runpod", None):
-        RUNPOD_API_URL = "https://api.runpod.ai/v2/"
-        RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
-        RUNPOD_MODEL_KEY = os.getenv("RUNPOD_MODEL_KEY")
-        if not (RUNPOD_API_KEY and RUNPOD_MODEL_KEY):
-            print("Error: RUNPOD_API_KEY or RUNPOD_MODEL_KEY not set, aborting...")
-            sys.exit(1)
 
-        url_base = RUNPOD_API_URL + RUNPOD_MODEL_KEY
+def print_exception_error(error):
+    print()
+    if code := error.get("code"):
+        title = f"Exception {code} on container:"
+        print(title)
+        print("-" * len(title))
+    if stack := error.get("stack"):
+        print(stack)
 
-        payload = {
-            "input": inputs,
-        }
-        print(url_base + "/run")
-        response = requests.post(
-            url_base + "/run",
-            json=payload,
-            headers={"Authorization": "Bearer " + RUNPOD_API_KEY},
+
+def format_time(milliseconds):
+    if milliseconds > 60000:
+        return f"{milliseconds / 1000 / 60:.1f}m"
+    elif milliseconds > 1000:
+        return f"{milliseconds / 1000:.1f}s"
+    return f"{milliseconds}ms"
+
+
+def print_timing_information(result, elapsed_time):
+    timings = result.get("$timings")
+    if timings:
+        timings_str = ", ".join(
+            f"{key}: {format_time(value)}" for key, value in timings.items()
         )
-
-        if response.status_code != 200:
-            print("Unexpected HTTP response code: " + str(response.status_code))
-            response_text = json.loads(response.text)
-            print("Error: '" + response_text.get("error", "Unknown error") + "'")
-            sys.exit(1)
-
-        print('response:', response)
-        result = response.json()
-        print('result:', result)
-
-        id = result["id"]
-
-        while result["status"] != "COMPLETED":
-            time.sleep(1)
-            response = requests.get(
-                f"{url_base}/status/{id}",
-                headers={"Authorization": "Bearer " + RUNPOD_API_KEY},
-            )
-            result = response.json()
-
-        result = result["output"]
-
+        print(f"Request took {elapsed_time:.1f}s ({timings_str})")
     else:
-        test_url = args.get("test_url", None) or TEST_URL
-        call_inputs = inputs["callInputs"]
-        stream_events = call_inputs and call_inputs.get("streamEvents", 0) != 0
-        print({"stream_events": stream_events})
-        if stream_events:
-            result = None
-            response = requests.post(test_url, json=inputs, stream=True)
-            for line in response.iter_lines():
-                if line:
-                    result = json.loads(line)
-                    if not result.get("$timings", None):
-                        print(result)
-        else:
-            response = requests.post(test_url, json=inputs)
-            try:
-                result = response.json()
-            except requests.exceptions.JSONDecodeError as error:
-                print(error)
-                print(response.text)
-                sys.exit(1)
+        print(f"Request took {elapsed_time:.1f}s")
 
-    finish = time.time() - start
     timings = result.get("$timings")
 
-    if timings:
-        timings_str = json.dumps(
-            dict(
-                map(
-                    lambda item: (
-                        item[0],
-                        f"{item[1]/1000/60:.1f}m"
-                        if item[1] > 60000
-                        else f"{item[1]/1000:.1f}s"
-                        if item[1] > 1000
-                        else str(item[1]) + "ms",
-                    ),
-                    timings.items(),
-                )
-            )
-        ).replace('"', "")[1:-1]
-        print(f"Request took {finish:.1f}s ({timings_str})")
-    else:
-        print(f"Request took {finish:.1f}s")
+# ================================
+# Functions for making HTTP requests
+# ================================
 
-    if (
-        result.get("images_base64", None) == None
-        and result.get("image_base64", None) == None
-    ):
-        error = result.get("$error", None)
+
+def post_request(url, payload, headers=None):
+    print(url)
+    response = requests.post(url, json=payload, headers=headers)
+    if response.status_code != 200:
+        print(f"Unexpected HTTP response code: {response.status_code}")
+        print(f"Error: '{response.json().get('error', 'Unknown error')}'")
+        sys.exit(1)
+    return response
+
+
+def get_request(url, headers=None):
+    print(url)
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        print(f"Unexpected HTTP response code: {response.status_code}")
+        print(f"Error: '{response.json().get('error', 'Unknown error')}'")
+        sys.exit(1)
+    return response
+
+
+# ================================
+# Functions related to test executions
+# ================================
+
+
+def process_result(result, name):
+    if result.get("images_base64") is None and result.get("image_base64") is None:
+        error = result.get("$error")
         if error:
-            code = error.get("code", None)
-            name = error.get("name", None)
-            message = error.get("message", None)
-            stack = error.get("stack", None)
-            if code and name and message and stack:
-                print()
-                title = f"Exception {code} on container:"
-                print(title)
-                print("-" * len(title))
-                # print(f'{name}("{message}")') - stack includes it.
-                print(stack)
-                return
-
-        print(json.dumps(result, indent=4))
-        print()
-        return result
-
-    images_base64 = result.get("images_base64", None)
-    if images_base64:
+            print_exception_error(error)
+            return
+    elif images_base64 := result.get("images_base64"):
         for idx, image_byte_string in enumerate(images_base64):
-            images_base64[idx] = decode_and_save(image_byte_string, f"{name}_{idx}")
-    else:
-        result["image_base64"] = decode_and_save(result["image_base64"], name)
+            images_base64[idx] = decode_base64_image_and_save(image_byte_string, f"{name}_{idx}")
+    elif image_base64 := result.get("image_base64"):
+        result["image_base64"] = decode_base64_image_and_save(image_base64, name)
 
     print()
     print(json.dumps(result, indent=4))
@@ -221,207 +150,265 @@ def runTest(name, args, extraCallInputs, extraModelInputs):
     return result
 
 
-test(
-    "txt2img",
-    {
-        "modelInputs": {
-            "prompt": "painting of 3-year-old boy,sweet smile,realistic,from neck up,detailed hair,(((in watercolor style))),created from brush strokes,abstract painting,",
-            "num_inference_steps": 40,
-        },
-        "callInputs": {
-            # "MODEL_ID": "<override_default>",  # (default)
-            # "PIPELINE": "StableDiffusionPipeline",  # (default)
-            # "SCHEDULER": "DPMSolverMultistepScheduler",  # (default)
-        },
+def run_test_runpod(inputs, args):
+    RUNPOD_API_URL = "https://api.runpod.ai/v2/"
+    RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
+    RUNPOD_MODEL_KEY = os.getenv("RUNPOD_MODEL_KEY")
+
+    if not (RUNPOD_API_KEY and RUNPOD_MODEL_KEY):
+        print("Error: RUNPOD_API_KEY or RUNPOD_MODEL_KEY not set, aborting...")
+        sys.exit(1)
+
+    url_base = RUNPOD_API_URL + RUNPOD_MODEL_KEY
+    payload = {"input": inputs}
+    headers = {"Authorization": "Bearer " + RUNPOD_API_KEY}
+
+    response = post_request(f"{url_base}/run", payload, headers)
+    print(response)
+    result = response.json()
+    print(result)
+
+    while result["status"] != "COMPLETED":
+        time.sleep(1)
+        request = get_request(f"{url_base}/status/{result['id']}", headers)
+        result = request.json()
+
+    return result["output"]
+
+
+def run_test_local(inputs, args):
+    test_url = args.get("test_url", TEST_URL)
+    stream_events = inputs.get("callInputs", {}).get("streamEvents", 0) != 0
+    print({"stream_events": stream_events})
+
+    if stream_events:
+        response = requests.post(test_url, json=inputs, stream=True, timeout=(6.1, 60 * 20))
+        for line in response.iter_lines():
+            if line:
+                try:
+                    result = json.loads(line.decode('utf-8'))
+                    if not result.get("$timings"):
+                        print(result)
+                    else:
+                        return result
+                except json.JSONDecodeError as error:
+                    print(f"Error decoding JSON: {error}")
+                    print(f"Received line: {line}")
+                    sys.exit(1)
+    else:
+        response = post_request(test_url, inputs)
+        try:
+            return response.json()
+        except json.JSONDecodeError as error:
+            print(f"Error decoding JSON: {error}")
+            print(f"Received text: {response.text}")
+            sys.exit(1)
+
+
+def run_test(name, args, extra_call_inputs, extra_model_inputs):
+    orig_inputs = all_tests.get(name)
+    inputs = {
+        "modelInputs": {**orig_inputs.get("modelInputs", {}), **extra_model_inputs},
+        "callInputs": {**orig_inputs.get("callInputs", {}), **extra_call_inputs},
+    }
+
+    print(f"Running test: {name}")
+    log_inputs(inputs)
+
+    start = time.time()
+
+    if args.get("runpod"):
+        result = run_test_runpod(inputs, args)
+    else:
+        result = run_test_local(inputs, args)
+
+    finish = time.time() - start
+    print_timing_information(result, finish)
+
+    return process_result(result, name)
+
+
+# ====================================
+# Test cases and adding them to the test suite
+# ====================================
+
+def test(name, inputs):
+    global all_tests
+    all_tests.update({name: inputs})
+
+
+all_tests = {}
+test("txt2img", {
+    "modelInputs": {
+        "prompt": "painting of 3-year-old boy,sweet smile,realistic,from neck up,detailed hair,(((in watercolor style))),created from brush strokes,abstract painting,",
+        "num_inference_steps": 40,
     },
-)
+    "callInputs": {
+        # "MODEL_ID": "<override_default>",  # (default)
+        # "PIPELINE": "StableDiffusionPipeline",  # (default)
+        # "SCHEDULER": "DPMSolverMultistepScheduler",  # (default)
+    },
+})
 
 # multiple images
-test(
-    "txt2img-multiple",
-    {
-        "modelInputs": {
-            "prompt": "realistic field of grass",
-            "num_images_per_prompt": 2,
-        }
+test("txt2img-multiple", {
+    "modelInputs": {
+        "prompt": "realistic field of grass",
+        "num_images_per_prompt": 2,
+    }
+})
+
+
+test("img2img", {
+    "modelInputs": {
+        "prompt": "A fantasy landscape, trending on artstation",
+        "image": encode_in_base64("sketch-mountains-input.jpg"),
     },
-)
-
-
-test(
-    "img2img",
-    {
-        "modelInputs": {
-            "prompt": "A fantasy landscape, trending on artstation",
-            "image": b64encode_file("sketch-mountains-input.jpg"),
-        },
-        "callInputs": {
-            "PIPELINE": "StableDiffusionImg2ImgPipeline",
-        },
+    "callInputs": {
+        "PIPELINE": "StableDiffusionImg2ImgPipeline",
     },
-)
+})
 
-test(
-    "inpaint-v1-4",
-    {
+test("inpaint-v1-4", {
+    "modelInputs": {
+        "prompt": "a cat sitting on a bench",
+        "image": encode_in_base64("overture-creations-5sI6fQgYIuo.png"),
+        "mask_image": encode_in_base64("overture-creations-5sI6fQgYIuo_mask.png"),
+    },
+    "callInputs": {
+        "MODEL_ID": "CompVis/stable-diffusion-v1-4",
+        "PIPELINE": "StableDiffusionInpaintPipelineLegacy",
+        "SCHEDULER": "DDIMScheduler",  # Note, as of diffusers 0.3.0, no LMS yet
+    },
+})
+
+test("inpaint-sd", {
+    "modelInputs": {
+        "prompt": "a cat sitting on a bench",
+        "image": encode_in_base64("overture-creations-5sI6fQgYIuo.png"),
+        "mask_image": encode_in_base64("overture-creations-5sI6fQgYIuo_mask.png"),
+    },
+    "callInputs": {
+        "MODEL_ID": "runwayml/stable-diffusion-inpainting",
+        "PIPELINE": "StableDiffusionInpaintPipeline",
+        "SCHEDULER": "DDIMScheduler",  # Note, as of diffusers 0.3.0, no LMS yet
+    },
+})
+
+test("checkpoint", {
+    "modelInputs": {
+        "prompt": "1girl",
+    },
+    "callInputs": {
+        "MODEL_ID": "hakurei/waifu-diffusion-v1-3",
+        "MODEL_URL": "s3://",
+        "CHECKPOINT_URL": "http://huggingface.co/hakurei/waifu-diffusion-v1-3/resolve/main/wd-v1-3-float16.ckpt",
+    },
+})
+
+if os.getenv("USE_PATCHMATCH"):
+    test("outpaint", {
         "modelInputs": {
-            "prompt": "a cat sitting on a bench",
-            "image": b64encode_file("overture-creations-5sI6fQgYIuo.png"),
-            "mask_image": b64encode_file("overture-creations-5sI6fQgYIuo_mask.png"),
+            "prompt": "girl with a pearl earing standing in a big room",
+            "image": encode_in_base64("girl_with_pearl_earing_outpainting_in.png"),
         },
         "callInputs": {
             "MODEL_ID": "CompVis/stable-diffusion-v1-4",
             "PIPELINE": "StableDiffusionInpaintPipelineLegacy",
             "SCHEDULER": "DDIMScheduler",  # Note, as of diffusers 0.3.0, no LMS yet
+            "FILL_MODE": "patchmatch",
         },
-    },
-)
-
-test(
-    "inpaint-sd",
-    {
-        "modelInputs": {
-            "prompt": "a cat sitting on a bench",
-            "image": b64encode_file("overture-creations-5sI6fQgYIuo.png"),
-            "mask_image": b64encode_file("overture-creations-5sI6fQgYIuo_mask.png"),
-        },
-        "callInputs": {
-            "MODEL_ID": "runwayml/stable-diffusion-inpainting",
-            "PIPELINE": "StableDiffusionInpaintPipeline",
-            "SCHEDULER": "DDIMScheduler",  # Note, as of diffusers 0.3.0, no LMS yet
-        },
-    },
-)
-
-test(
-    "checkpoint",
-    {
-        "modelInputs": {
-            "prompt": "1girl",
-        },
-        "callInputs": {
-            "MODEL_ID": "hakurei/waifu-diffusion-v1-3",
-            "MODEL_URL": "s3://",
-            "CHECKPOINT_URL": "http://huggingface.co/hakurei/waifu-diffusion-v1-3/resolve/main/wd-v1-3-float16.ckpt",
-        },
-    },
-)
-
-if os.getenv("USE_PATCHMATCH"):
-    test(
-        "outpaint",
-        {
-            "modelInputs": {
-                "prompt": "girl with a pearl earing standing in a big room",
-                "image": b64encode_file("girl_with_pearl_earing_outpainting_in.png"),
-            },
-            "callInputs": {
-                "MODEL_ID": "CompVis/stable-diffusion-v1-4",
-                "PIPELINE": "StableDiffusionInpaintPipelineLegacy",
-                "SCHEDULER": "DDIMScheduler",  # Note, as of diffusers 0.3.0, no LMS yet
-                "FILL_MODE": "patchmatch",
-            },
-        },
-    )
+    })
 
 # Actually we just want this to be a non-default test?
 if True or os.getenv("USE_DREAMBOOTH"):
-    test(
-        "dreambooth",
-        # If you're calling from the command line, don't forget to a
-        # specify a destination if you want your fine-tuned model to
-        # be uploaded somewhere at the end.
-        {
-            "modelInputs": {
-                "instance_prompt": "a photo of daiton person",
-                "instance_images": list(
-                    map(
-                        b64encode_file,
-                        list(Path("tests/fixtures/dreambooth").iterdir()),
-                    )
-                ),
-                # Option 1: upload to HuggingFace (see notes below)
-                # Make sure your HF API token has read/write access.
-                "hub_model_id": "evanscho/davi-tests",
-                "push_to_hub": True,
-            },
-            "callInputs": {
-                "train": "dreambooth",
-                # Option 2: store on S3.  Note the **s3:///* (x3).  See notes below.
-                # "dest_url": "s3:///bucket/filename.tar.zst".
-            },
+    # If you're calling from the command line, don't forget to
+    # specify a destination if you want your fine-tuned model to
+    # be uploaded somewhere at the end.
+    test("dreambooth", {
+        "modelInputs": {
+            "instance_prompt": "a photo of daiton person",
+            "instance_images": list(
+                map(
+                    encode_in_base64,
+                    list(Path("tests/fixtures/dreambooth").iterdir()),
+                )
+            ),
+            # Option 1: upload to HuggingFace (see notes below)
+            # Make sure your HF API token has read/write access.
+            "hub_model_id": "evanscho/davi-tests",
+            "push_to_hub": True,
         },
-    )
+        "callInputs": {
+            "train": "dreambooth",
+            "streamEvents": True,
+            # Option 2: store on S3.  Note the **s3:///* (x3).  See notes below.
+            # "dest_url": "s3:///bucket/filename.tar.zst".
+        },
+    })
 
 
-def main(tests_to_run, args, extraCallInputs, extraModelInputs):
-    invalid_tests = []
-    for test in tests_to_run:
-        if all_tests.get(test, None) == None:
-            invalid_tests.append(test)
+# =============================
+# Parse arguments and run tests
+# =============================
 
-    if len(invalid_tests) > 0:
-        print("No such tests: " + ", ".join(invalid_tests))
+def validate_tests(tests_to_run):
+    invalid_tests = [test for test in tests_to_run if test not in all_tests]
+    if invalid_tests:
+        print(f"No such tests: {', '.join(invalid_tests)}")
         exit(1)
 
+
+def parse_arguments():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--runpod", action="store_true")
+    parser.add_argument("--scheduler", type=str)
+    parser.add_argument("--call-arg", action="append", type=str, default=[])
+    parser.add_argument("--model-arg", action="append", type=str, default=[])
+    # Returns a tuple of (args, tests_to_run), tests_to_run being the remaining unparsed arguments
+    return parser.parse_known_args()
+
+
+def parse_key_value_args(args, arg_type):
+    parsed_args = {}
+    raw_args = getattr(args, f"{arg_type}_arg", [])
+    for arg in raw_args:
+        key, value = arg.split("=", 1)
+        if value.lower() == "true":
+            value = True
+        elif value.lower() == "false":
+            value = False
+        elif value.isdigit():
+            value = int(value)
+        elif value.replace(".", "", 1).isdigit():
+            value = float(value)
+        parsed_args[key] = value
+    return parsed_args
+
+
+def main(tests_to_run, args, extra_call_inputs, extra_model_inputs):
+    validate_tests(tests_to_run)
     for test in tests_to_run:
-        runTest(test, args, extraCallInputs, extraModelInputs)
+        run_test(test, args, extra_call_inputs, extra_model_inputs)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--runpod", required=False, action="store_true")
-    parser.add_argument("--scheduler", required=False, type=str)
-    parser.add_argument("--call-arg", action="append", type=str)
-    parser.add_argument("--model-arg", action="append", type=str)
-
-    args, tests_to_run = parser.parse_known_args()
-
-    call_inputs = {}
-    model_inputs = {}
-
-    if args.call_arg:
-        for arg in args.call_arg:
-            name, value = arg.split("=", 1)
-            if value.lower() == "true":
-                value = True
-            elif value.lower() == "false":
-                value = False
-            elif value.isdigit():
-                value = int(value)
-            elif value.replace(".", "", 1).isdigit():
-                value = float(value)
-            call_inputs.update({name: value})
-
-    if args.model_arg:
-        for arg in args.model_arg:
-            name, value = arg.split("=", 1)
-            if value.lower() == "true":
-                value = True
-            elif value.lower() == "false":
-                value = False
-            elif value.isdigit():
-                value = int(value)
-            elif value.replace(".", "", 1).isdigit():
-                value = float(value)
-            model_inputs.update({name: value})
+    args, tests_to_run = parse_arguments()
+    call_inputs = parse_key_value_args(args, "call")
+    model_inputs = parse_key_value_args(args, "model")
 
     if args.scheduler:
-        call_inputs.update({"SCHEDULER": args.scheduler})
+        call_inputs["SCHEDULER"] = args.scheduler
 
-    if len(tests_to_run) < 1:
-        print(
-            "Usage: python3 test.py [--runpod] [--xmfe=1/0] [--scheduler=SomeScheduler] [all / test1] [test2] [etc]"
-        )
+    if not tests_to_run:
+        print("Usage: python3 test.py [--runpod] [--scheduler=SomeScheduler] [all / test1] [test2] [etc]")
         sys.exit()
-    elif len(tests_to_run) == 1 and (
-        tests_to_run[0] == "ALL" or tests_to_run[0] == "all"
-    ):
+    elif tests_to_run[0].upper() == "ALL":
         tests_to_run = list(all_tests.keys())
 
     main(
         tests_to_run,
         vars(args),
-        extraCallInputs=call_inputs,
-        extraModelInputs=model_inputs,
+        extra_call_inputs=call_inputs,
+        extra_model_inputs=model_inputs,
     )
