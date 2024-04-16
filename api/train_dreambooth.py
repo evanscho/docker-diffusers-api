@@ -23,10 +23,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 
-from utils.logging import Tee
-import sys
-import threading
-import io
 import argparse
 import copy
 import gc
@@ -36,8 +32,6 @@ import logging
 import math
 import os
 import shutil
-import warnings
-import time
 from pathlib import Path
 
 import numpy as np
@@ -78,6 +72,8 @@ from utils import Storage
 import subprocess
 import re
 import asyncio
+from file_transfer_progress import perform_while_tracking_progress
+import traceback
 
 # Our original code in docker-diffusers-api:
 
@@ -85,8 +81,16 @@ HF_AUTH_TOKEN = os.getenv("HF_AUTH_TOKEN")
 
 
 def send_status_update(process_name: str, status: str, payload: dict = {}, options: dict = {}):
-    event_loop = options.get("event_loop", None) or asyncio.get_event_loop()
-    asyncio.run_coroutine_threadsafe(_send_status_update(process_name, status, payload, options), event_loop)
+    try:
+        event_loop = options.get("event_loop", None)
+        if event_loop:
+            asyncio.run_coroutine_threadsafe(_send_status_update(
+                process_name, status, payload, options), event_loop)
+        else:
+            logging.error("No event loop to send status update")
+    except Exception as e:
+        logging.error(
+            f"Failed to send status update: {e.__class__.__name__}: {str(e)}\n{traceback.format_exc()}")
 
 
 def TrainDreamBooth(model_id: str, pipeline, model_inputs, call_inputs, status_update_options, revision=None, variant=None):
@@ -429,10 +433,10 @@ def import_model_class_from_model_name_or_path(pretrained_model_name_or_path: st
         from transformers import CLIPTextModel
 
         return CLIPTextModel
-    elif model_class == "RobertaSeriesModelWithTransformation":
-        from diffusers.pipelines.alt_diffusion.modeling_roberta_series import RobertaSeriesModelWithTransformation
+    elif model_class == "RobertaModel":
+        from transformers import RobertaModel
 
-        return RobertaSeriesModelWithTransformation
+        return RobertaModel
     elif model_class == "T5EncoderModel":
         from transformers import T5EncoderModel
 
@@ -1292,7 +1296,8 @@ def upload_to_huggingface(repo_id, images, pipeline, args, status_update_options
         repo_folder=args.output_dir,
         pipeline=pipeline,
     )
-    perform_upload({
+    status_instance = status_update_options.get("status_instance", None)
+    perform_while_tracking_progress(upload_folder, {
         "repo_id": repo_id,
         "folder_path": args.output_dir,
         "commit_message": "End of training",
@@ -1300,78 +1305,8 @@ def upload_to_huggingface(repo_id, images, pipeline, args, status_update_options
         "ignore_patterns": ["step_*", "epoch_*", "logs/*"],
         "token": args.hub_token,   # ESS: without this, get 401 RepositoryNotFoundError if didn't create new repo, since we were only passing the token in create_repo
         # run_as_future: DDA TODO Whether or not to run this method in the background
-    }, status_update_options)
+    }, "upload", status_instance)
 
-
-def monitor_stderr(stderr_output, upload_thread, status_update_options):
-    try:
-        status_instance = status_update_options.get("status_instance", None)
-        last_position = 0  # Keep track of the last read position
-
-        while True:
-            stderr_output.seek(last_position)  # Move to the last read position
-            all_content = stderr_output.read()  # Read new content since last read
-            if all_content:
-                lines = all_content.splitlines()
-                if lines:
-                    last_line = lines[-1]
-                    progress = parse_progress(last_line)
-                    if progress is not None:
-                        status_instance.update("upload", progress)
-                last_position = stderr_output.tell()  # Update the position after reading
-
-            if not upload_thread.is_alive():
-                print('Exiting monitoring thread as upload thread has finished')
-                break  # Exit if the upload thread has finished
-
-            time.sleep(1)  # Sleep to wait for more data
-
-    except Exception as e:
-        print('Unhandling exception in monitoring stderr:', e)
-
-
-def parse_progress(output):
-    # Use regex to extract the progress
-    pattern = re.compile(r'(\d+(?:\.\d+)?)([kMG]?)/(\d+(?:\.\d+)?)([kMG]?)')
-    match = pattern.search(output)
-    if match:
-        current, current_unit, total, total_unit = match.groups()
-        # Convert to bytes for uniformity
-        current_bytes = convert_to_bytes(float(current), current_unit)
-        total_bytes = convert_to_bytes(float(total), total_unit)
-        progress = current_bytes / total_bytes if total_bytes > 0 else 0
-        return progress
-    return None
-
-
-def convert_to_bytes(number, unit):
-    unit_factors = {'': 1, 'k': 1024, 'M': 1024**2, 'G': 1024**3}
-    return number * unit_factors[unit]
-
-
-def perform_upload(upload_folder_kwargs, status_update_options):
-    transfer_progress_output = io.StringIO()
-    original_stderr = sys.stderr
-    if isinstance(sys.stderr, Tee):
-        sys.stderr.add_log_file(transfer_progress_output)
-    else:
-        sys.stderr = Tee(sys.stderr, transfer_progress_output)
-
-    upload_thread = threading.Thread(target=upload_folder, kwargs=upload_folder_kwargs)
-    upload_thread.start()
-
-    # Wait for a few seconds before starting the monitor thread so the upload thread can start more quickly
-    time.sleep(3)
-
-    monitor_thread = threading.Thread(target=monitor_stderr, args=(
-        transfer_progress_output, upload_thread, status_update_options))
-    monitor_thread.start()
-
-    upload_thread.join()
-    monitor_thread.join()
-
-    if isinstance(sys.stderr, Tee):
-        sys.stderr.remove_log_file(transfer_progress_output)
 
 # DDA
 # if __name__ == "__main__":

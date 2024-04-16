@@ -112,7 +112,7 @@ async def upsample(model_inputs, call_inputs, status_update_options={}, startReq
         else:
             modelModel = nets[model["net"]](**model["initArgs"])
             await send_status_update(
-                "loadModel",
+                "load_model",
                 "start",
                 {"startRequestId": startRequestId},
                 status_update_options,
@@ -128,7 +128,7 @@ async def upsample(model_inputs, call_inputs, status_update_options={}, startReq
                 half=True,
             )
             await send_status_update(
-                "loadModel",
+                "load_model",
                 "done",
                 {"startRequestId": startRequestId},
                 status_update_options,
@@ -162,7 +162,7 @@ async def upsample(model_inputs, call_inputs, status_update_options={}, startReq
         face_enhancer = models.get("GFPGAN", None)
         if not face_enhancer:
             await send_status_update(
-                "loadModel",
+                "load_model",
                 "start",
                 {"startRequestId": startRequestId},
                 status_update_options,
@@ -176,7 +176,7 @@ async def upsample(model_inputs, call_inputs, status_update_options={}, startReq
                 bg_upsampler=upsampler,
             )
             await send_status_update(
-                "loadModel",
+                "load_model",
                 "done",
                 {"startRequestId": startRequestId},
                 status_update_options,

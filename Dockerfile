@@ -49,7 +49,7 @@ RUN git clone https://github.com/huggingface/diffusers && cd diffusers && git ch
 WORKDIR /api
 RUN pip install -e diffusers
 
-# Set to true to NOT download model at build time, rather at init / usage.
+# Set to true to NOT download model at build time, and instead at usage.
 ARG RUNTIME_DOWNLOADS=1
 ENV RUNTIME_DOWNLOADS=${RUNTIME_DOWNLOADS}
 

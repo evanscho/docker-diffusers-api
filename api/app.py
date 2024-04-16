@@ -6,19 +6,19 @@ import base64
 from io import BytesIO
 import PIL
 import json
-from loadModel import loadModel
+from load_model import load_model
 from status_update import send_status_update, get_process_durations, initialize_session
 from status import Status, StatusSender
 import os
 import numpy as np
 import skimage
 import skimage.measure
-from getScheduler import getScheduler, SCHEDULERS
-from getPipeline import (
-    getPipelineClass,
-    getPipelineForModel,
-    listAvailablePipelines,
-    clearPipelines,
+from get_scheduler import get_scheduler, SCHEDULERS
+from get_pipeline import (
+    get_pipeline_class,
+    get_pipeline_for_model,
+    list_available_pipelines,
+    clear_pipelines,
 )
 
 import requests
@@ -30,6 +30,7 @@ from utils import Storage
 from hashlib import sha256
 from threading import Timer
 import extras
+from file_transfer_progress import perform_while_tracking_progress
 
 # from torch import autocast
 # import re
@@ -84,7 +85,7 @@ async def init():
 
     # If runtime downloads are not enabled, load the model at init time
     if not RUNTIME_DOWNLOADS:
-        model = loadModel(
+        model = load_model(
             model_id=MODEL_ID,
             load=True,
             precision=MODEL_PRECISION,
@@ -152,9 +153,10 @@ async def prepare_status_update_options(call_inputs, response):
         status_sender = StatusSender(status_instance, response)
         await status_sender.send_status(1)
 
-        # Add the status instance and status updater to the status update options
         status_update_options.update({"status_instance": status_instance})
         status_update_options.update({"status_sender": status_sender})
+
+        # Needed to cancel the status update task from another thread
         status_update_options.update({"event_loop": asyncio.get_event_loop()})
 
     return status_update_options
@@ -251,8 +253,10 @@ async def inference(all_inputs: dict, response) -> dict:
         # Extract the pipeline name from the call inputs, and get the corresponding pipeline class
         pipeline_name = call_inputs.get("PIPELINE", None)
         if pipeline_name:
-            pipeline_class = getPipelineClass(pipeline_name)
+            pipeline_class = get_pipeline_class(pipeline_name)
 
+        print("model_filename", model_filename, "last_model_filename", last_model_filename)
+        print("model_dir", model_dir, "os.path.isdir(model_dir)", os.path.isdir(model_dir))
         # If the new model filename is not the same as the last one, and it's not already on disk, download and load the new model
         if model_filename != last_model_filename and not os.path.isdir(model_dir):
             model_url = call_inputs.get("MODEL_URL", None)
@@ -270,7 +274,7 @@ async def inference(all_inputs: dict, response) -> dict:
 
             # Clear the pipeline cache when changing the loaded model, as pipelines include references to the model and would
             # therefore prevent memory being reclaimed after unloading the previous model.
-            clearPipelines()
+            clear_pipelines()
 
             # Reset the cross attention arguments
             cross_attention_kwargs = None
@@ -279,29 +283,28 @@ async def inference(all_inputs: dict, response) -> dict:
             if model:
                 model.to("cpu")
 
-            await send_status_update("loadModel", "start", {"startRequestId": startRequestId}, status_update_options)
+            await send_status_update("load_model", "start", {"startRequestId": startRequestId}, status_update_options)
 
             # Load the model
-            model = await asyncio.to_thread(
-                loadModel,
-                model_id=model_id,
-                load=True,
-                precision=model_precision,
-                revision=model_revision,
-                status_update_options=status_update_options,
-                pipeline_class=pipeline_class if pipeline_name else None,
-            )
+            model = perform_while_tracking_progress(load_model, {
+                "model_id": model_id,
+                "load": True,
+                "precision": model_precision,
+                "revision": model_revision,
+                "status_update_options": status_update_options,
+                "pipeline_class": pipeline_class if pipeline_name else None,
+            }, "load_model", status_instance)
 
-            await send_status_update("loadModel", "done", {"startRequestId": startRequestId}, status_update_options)
+            await send_status_update("load_model", "done", {"startRequestId": startRequestId}, status_update_options)
             last_model_filename = model_filename
             last_attn_procs = None
             last_lora_weights = None
 
     if MODEL_ID == "ALL":
         if model_filename != last_model_filename:
-            clearPipelines()
+            clear_pipelines()
             cross_attention_kwargs = None
-            model = loadModel(
+            model = load_model(
                 model_id,
                 load=True,
                 precision=model_precision,
@@ -329,7 +332,7 @@ async def inference(all_inputs: dict, response) -> dict:
             result["$meta"].update({"PIPELINE": pipeline_name})
 
         # Get the pipeline for the model
-        pipeline = getPipelineForModel(
+        pipeline = get_pipeline_for_model(
             pipeline_name,
             model,
             model_id,
@@ -342,7 +345,7 @@ async def inference(all_inputs: dict, response) -> dict:
                     "code": "NO_SUCH_PIPELINE",
                     "message": f'"{pipeline_name}" is not an official nor community Diffusers pipelines',
                     "requested": pipeline_name,
-                    "available": listAvailablePipelines(),
+                    "available": list_available_pipelines(),
                 }
             }
     else:
@@ -356,7 +359,7 @@ async def inference(all_inputs: dict, response) -> dict:
         result["$meta"].update({"SCHEDULER": scheduler_name})
 
     # Get the scheduler for the model
-    pipeline.scheduler = getScheduler(model_id, scheduler_name)
+    pipeline.scheduler = get_scheduler(model_id, scheduler_name)
     if pipeline.scheduler == None:
         return {
             "$error": {

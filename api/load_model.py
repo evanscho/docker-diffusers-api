@@ -1,6 +1,6 @@
 import os
 from diffusers import pipelines as diffusers_pipelines, AutoPipelineForText2Image
-from getScheduler import getScheduler, DEFAULT_SCHEDULER
+from get_scheduler import get_scheduler, DEFAULT_SCHEDULER
 from precision import torch_dtype_from_precision
 from device import device
 import time
@@ -25,9 +25,11 @@ MODEL_IDS = [
 # Loads a model from the cache or downloads it from Hugging Face.
 # Author designed it so that downloading can be done in a separate call from the loading to GPU,
 # so that they can be independently timed.
-def loadModel(
+
+
+def load_model(
     model_id: str,
-    load=True, # If false, will just download the model (if not already cached), and not load it to GPU
+    load=True,  # If false, will just download the model (if not already cached), and not load it to GPU
     precision=None,
     revision=None,
     status_update_options={},
@@ -42,7 +44,7 @@ def loadModel(
 
     # Print the function parameters
     print(
-        "loadModel",
+        "load_model",
         {
             "model_id": model_id,
             "load": load,
@@ -69,7 +71,7 @@ def loadModel(
     )
 
     # Get the scheduler for the model
-    scheduler = getScheduler(model_id, DEFAULT_SCHEDULER, not load)
+    scheduler = get_scheduler(model_id, DEFAULT_SCHEDULER, not load)
 
     # Get the directory for the model
     model_dir = os.path.join(MODELS_DIR, model_id)

@@ -1,5 +1,6 @@
 import time
-import os, fnmatch
+import os
+import fnmatch
 from diffusers import (
     DiffusionPipeline,
     pipelines as diffusers_pipelines,
@@ -9,10 +10,10 @@ from precision import torch_dtype_from_precision
 HOME = os.path.expanduser("~")
 MODELS_DIR = os.path.join(HOME, ".cache", "diffusers-api")
 _pipelines = {}
-_availableCommunityPipelines = None
+_available_community_pipelines = None
 
 
-def listAvailablePipelines():
+def list_available_pipelines():
     return (
         list(
             filter(
@@ -20,24 +21,24 @@ def listAvailablePipelines():
                 list(diffusers_pipelines.__dict__.keys()),
             )
         )
-        + availableCommunityPipelines()
+        + available_community_pipelines()
     )
 
 
-def availableCommunityPipelines():
-    global _availableCommunityPipelines
-    if not _availableCommunityPipelines:
-        _availableCommunityPipelines = list(
+def available_community_pipelines():
+    global _available_community_pipelines
+    if not _available_community_pipelines:
+        _available_community_pipelines = list(
             map(
                 lambda s: s[0:-3],
                 fnmatch.filter(os.listdir("diffusers/examples/community"), "*.py"),
             )
         )
 
-    return _availableCommunityPipelines
+    return _available_community_pipelines
 
 
-def clearPipelines():
+def clear_pipelines():
     """
     Clears the pipeline cache.  Important to call this when changing the
     loaded model, as pipelines include references to the model and would
@@ -48,21 +49,21 @@ def clearPipelines():
     _pipelines = {}
 
 
-def getPipelineClass(pipeline_name: str):
+def get_pipeline_class(pipeline_name: str):
     if hasattr(diffusers_pipelines, pipeline_name):
         return getattr(diffusers_pipelines, pipeline_name)
-    elif pipeline_name in availableCommunityPipelines():
+    elif pipeline_name in available_community_pipelines():
         return DiffusionPipeline
 
 
-def getPipelineForModel(
+def get_pipeline_for_model(
     pipeline_name: str, model, model_id, model_revision, model_precision
 ):
     """
     Inits a new pipeline, re-using components from a previously loaded
     model.  The pipeline is cached and future calls with the same
     arguments will return the previously initted instance.  Be sure
-    to call `clearPipelines()` if loading a new model, to allow the
+    to call `clear_pipelines()` if loading a new model, to allow the
     previous model to be garbage collected.
     """
     pipeline = _pipelines.get(pipeline_name)
@@ -88,7 +89,7 @@ def getPipelineForModel(
                 feature_extractor=model.feature_extractor,
             )
 
-    elif pipeline_name in availableCommunityPipelines():
+    elif pipeline_name in available_community_pipelines():
         model_dir = os.path.join(MODELS_DIR, model_id)
         if not os.path.isdir(model_dir):
             model_dir = None

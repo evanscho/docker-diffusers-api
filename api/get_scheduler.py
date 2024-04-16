@@ -18,7 +18,7 @@ SCHEDULERS = [
 DEFAULT_SCHEDULER = os.getenv("DEFAULT_SCHEDULER", SCHEDULERS[0])
 
 
-def initScheduler(model_id: str, scheduler_id: str, download=False):
+def init_scheduler(model_id: str, scheduler_id: str, download=False):
     print(f"Initializing {scheduler_id} for {model_id}...")
     start = time.time()
     scheduler = getattr(_schedulers, scheduler_id)
@@ -44,7 +44,7 @@ def initScheduler(model_id: str, scheduler_id: str, download=False):
 schedulers = {}
 
 
-def getScheduler(model_id: str, scheduler_id: str, download=False):
+def get_scheduler(model_id: str, scheduler_id: str, download=False):
     schedulersByModel = schedulers.get(model_id, None)
     if schedulersByModel == None:
         schedulersByModel = {}
@@ -67,7 +67,7 @@ def getScheduler(model_id: str, scheduler_id: str, download=False):
 
     scheduler = schedulersByModel.get(scheduler_id, None)
     if scheduler == None:
-        scheduler = initScheduler(model_id, scheduler_id, download)
+        scheduler = init_scheduler(model_id, scheduler_id, download)
         schedulersByModel.update({scheduler_id: scheduler})
 
     return scheduler

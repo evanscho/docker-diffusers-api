@@ -2,7 +2,7 @@
 # It runs during container build time to get model weights built into the container
 
 import os
-from loadModel import loadModel, MODEL_IDS
+from load_model import load_model, MODEL_IDS
 from utils import Storage
 from pathlib import Path
 from convert_to_diffusers import main as convert_to_diffusers
@@ -108,7 +108,7 @@ async def download_model(
         hf_model_id = hf_model_id or model_id
 
         # Do a dry run of loading the huggingface model, which will have already downloaded weights at build time
-        loadModel(
+        load_model(
             model_id=hf_model_id,
             load=False,
             precision=model_precision,
