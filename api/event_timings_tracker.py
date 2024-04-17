@@ -18,8 +18,8 @@ class EventTimingsTracker:
     def __init__(self):
         if not hasattr(self, 'initialized'):  # Ensures initialization happens only once
 
-            # Initiate the run with the creation time (_ctime)
-            self.run = {"_ctime": self.get_now()}
+            # Initiate the run with the creation time
+            self.run = {"creation_time": self.get_now()}
 
             # Opens a connection to the server, so create FuturesSession here to allow for persistence across requests
             # FuturesSession is a subclass of Session that returns a Future object for each request, so the request is non-blocking
@@ -32,6 +32,9 @@ class EventTimingsTracker:
 
             self.container_id = self.retrieve_container_id()
             self.is_first_run_after_server_start = True
+            self.last_process_name = ""
+            self.last_time = None
+
             self.initialized = True
 
     def start_new_run(self):
@@ -39,10 +42,13 @@ class EventTimingsTracker:
         """Unless it's the first run after the server starts, in which case the run was already initialized in init() and we don't want to clear it"""
         if self.is_first_run_after_server_start:
             self.is_first_run_after_server_start = False
+            self.run["inference_start"] = self.get_now()
         else:
-            # Initiate the run with the creation time (_ctime)
-            self.run = {"_ctime": self.get_now()}
+            # Initiate the run with the creation timestamp and the start of the inference process
+            self.run = {"creation_time": self.get_now(), "inference_start": self.get_now()}
 
+        self.last_process_name = "inference_start"
+        self.last_time = self.run["inference_start"]
         return self
 
     def get_now(self):
@@ -65,30 +71,18 @@ class EventTimingsTracker:
                 logging.error("mountinfo not found, running outside a container?")
         return container_id
 
-    def get_process_durations(self):
-        """Calculate and retrieve the duration of each process in the run"""
-        process_durations = {}
-
-        for process_name in self.run.keys():
-            # Skip the '_ctime' entry as it's not a process, just the creation time of the run
-            if process_name == "_ctime":
-                continue
-
-            # If both start and end times are available, calculate the duration
-            start_time = self.run[process_name].get("start")
-            end_time = self.run[process_name].get("done")
-            if start_time and end_time:
-                duration = end_time - start_time
-                process_durations[process_name] = duration
-            else:
-                # If either start or end time is missing, set the duration as -1
-                process_durations[process_name] = -1
-
-        return process_durations
-
     def update_process_with_current_timestamp(self, process_name, status, current_time):
         """Add the start or done timestamp to the given process, within the current run"""
         if status == "start":
+
+            # If there was a previous process, create a new entry for the time taken to go from the previous process to this one
+            if self.last_process_name:
+                self.run[f"{self.last_process_name} to {process_name}"] = {
+                    "start": self.last_time,
+                    "done": current_time,
+                    "diff": current_time - self.last_time
+                }
+
             self.run[process_name] = {"start": current_time, "last_time": current_time}
         elif status == "done":
             if process_name in self.run and "start" in self.run[process_name]:
@@ -106,6 +100,9 @@ class EventTimingsTracker:
                 logging.warning(f'Process "{process_name}" did not have a starting time logged')
                 self.run[process_name] = {"last_time": current_time}
 
+        self.last_process_name = process_name
+        self.last_time = current_time
+
     async def send_event_update(self, process_name, status, payload={}, options={}):
         """Asynchronously send status updates about an event (typically "start" or "done" of a process)"""
 
@@ -117,7 +114,7 @@ class EventTimingsTracker:
             "status": status,
             "container_id": self.container_id,
             "time": current_time,
-            "t": current_time - self.run["_ctime"],
+            "t": current_time - self.run["creation_time"],
             "tsl": current_time - self.run[process_name]["last_time"],
             "payload": payload,
         }
@@ -145,3 +142,24 @@ class EventTimingsTracker:
 
         # Print the data payload to the server even if not sending it anywhere, such as during init()
         print(datetime.datetime.now(), data_payload)
+
+    def get_process_durations(self):
+        """Calculate and retrieve the duration of each process in the run"""
+        process_durations = {}
+
+        for process_name in self.run.keys():
+            # Skip entries that aren't real processes, just the start and end times of the run
+            if process_name in ["creation_time", "inference_start", "completion"]:
+                continue
+
+            # If both start and end times are available, calculate the duration
+            start_time = self.run[process_name].get("start")
+            end_time = self.run[process_name].get("done")
+            if start_time and end_time:
+                duration = end_time - start_time
+                process_durations[process_name] = duration
+            else:
+                # If either start or end time is missing, set the duration as -1
+                process_durations[process_name] = -1
+
+        return process_durations

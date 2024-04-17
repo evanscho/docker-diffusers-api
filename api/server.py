@@ -16,6 +16,7 @@ import sys
 import time
 from utils.logging import Tee
 import logging
+from event_completion_status import PercentageCompleteStatus, PercentageCompleteStatusSender
 
 # Open the log file and create a Tee object that writes to both the log file and stdout/stderr
 log_file = open('training.log', 'a')
@@ -81,21 +82,35 @@ async def inference(request):
     call_inputs = all_inputs.get("callInputs", None)
     stream_events = call_inputs and call_inputs.get("streamEvents", 0) != 0
 
+    status_sender = None
     streaming_response = None
     try:
         if stream_events:
             streaming_response = await request.respond(content_type="application/x-ndjson")
 
-        output = await diffusers_model.inference(all_inputs, streaming_response)
+            # Start the timer to send status updates every second
+            status_instance = PercentageCompleteStatus()
+            status_sender = PercentageCompleteStatusSender(status_instance, streaming_response)
+            await status_sender.send_status(1)
+
+        output = await diffusers_model.inference(all_inputs, streaming_response if stream_events else None, status_instance if stream_events else None)
+        if output is None:
+            return json_response({"error": "No output from model"}, status=500)
         if streaming_response:
             await streaming_response.send(json.dumps(output) + "\n")
+            await streaming_response.eof()
         else:
             return json_response(output)
     except SanicException as e:
-        logging.error(f"Failed to send streaming response: {str(e)}")
+        logging.exception(f"Failed to send streaming response: {str(e)}")
         return json_response({"error": "Server error"}, status=500)
     except Exception as e:
         return await handle_exception(streaming_response if stream_events else None, e)
+    finally:
+        if status_sender:
+            await status_sender.stop()  # Stop sending status updates
+        if streaming_response:
+            await streaming_response.eof()
 
 
 async def handle_exception(stream, exception):

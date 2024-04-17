@@ -46,10 +46,11 @@ class PercentageCompleteStatusSender:
         self.task = asyncio.create_task(self._send_status_async(frequency))
         await self.running.wait()  # Wait for the loop to start
 
-    def stop(self):
+    async def stop(self):
         """Stop sending status updates."""
         if self.task and not self.task.done():
             self.running.clear()  # Clear the event to stop the loop
             # Don't actually cancel the task with self.task.cancel() since get into issues of
             # using multiple event loops when calling it from a different thread
+            await self.task
             self.task = None

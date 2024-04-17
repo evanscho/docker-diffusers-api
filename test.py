@@ -83,9 +83,7 @@ def print_exception_error(error):
 
 
 def format_time(milliseconds):
-    if milliseconds > 60000:
-        return f"{milliseconds / 1000 / 60:.1f}m"
-    elif milliseconds > 1000:
+    if milliseconds > 1000:
         return f"{milliseconds / 1000:.1f}s"
     return f"{milliseconds}ms"
 
@@ -93,26 +91,42 @@ def format_time(milliseconds):
 def print_timing_information(result, elapsed_time):
     timings = result.get("$timings")
     if timings:
+        # Create string of timings, but filter out init timings since they're not core to the current run
         timings_str = ", ".join(
-            f"{key}: {format_time(value)}" for key, value in timings.items()
+            f"{key}: {format_time(value)}" for key, value in timings.items() if "init" not in key
         )
         print(f"Request took {elapsed_time:.1f}s ({timings_str})")
     else:
         print(f"Request took {elapsed_time:.1f}s")
-
-    timings = result.get("$timings")
 
 # ================================
 # Functions for making HTTP requests
 # ================================
 
 
+def request_error_handling(response):
+    error_message = "Unknown error"  # Default error message
+    try:
+        # Attempt to decode the JSON response to fetch the 'error' key
+        error_message = response.json().get('error', error_message)
+    except ValueError:
+        # Handle cases where the response is not in JSON format
+        error_message = response.text or error_message
+
+    # Limiting the error message to the first 5 lines if it's longer
+    limited_error_message = '\n'.join(error_message.splitlines()[:10])
+    if len(error_message.splitlines()) > 10:
+        limited_error_message += "\n[...truncated...]"
+
+    print(f"Unexpected HTTP response code: {response.status_code} - {response.reason}")
+    print(f"Error: '{limited_error_message}'")
+
+
 def post_request(url, payload, headers=None):
     print(url)
     response = requests.post(url, json=payload, headers=headers)
     if response.status_code != 200:
-        print(f"Unexpected HTTP response code: {response.status_code}")
-        print(f"Error: '{response.json().get('error', 'Unknown error')}'")
+        request_error_handling(response)
         sys.exit(1)
     return response
 
@@ -121,8 +135,7 @@ def get_request(url, headers=None):
     print(url)
     response = requests.get(url, headers=headers)
     if response.status_code != 200:
-        print(f"Unexpected HTTP response code: {response.status_code}")
-        print(f"Error: '{response.json().get('error', 'Unknown error')}'")
+        request_error_handling(response)
         sys.exit(1)
     return response
 
@@ -183,18 +196,33 @@ def run_test_local(inputs, args):
 
     if stream_events:
         response = requests.post(test_url, json=inputs, stream=True, timeout=(6.1, 60 * 20))
+        last_result = None
         for line in response.iter_lines():
             if line:
                 try:
-                    result = json.loads(line.decode('utf-8'))
-                    if not result.get("$timings"):
-                        print(result)
+                    decoded_line = json.loads(line.decode('utf-8'))
+                    last_result = decoded_line  # Update the last result with the current line
+
+                    # Print streamed lines as they come in
+                    if not decoded_line.get("$timings"):
+                        print(decoded_line)
+                    # Return once the final result is received
                     else:
-                        return result
+                        return decoded_line
                 except json.JSONDecodeError as error:
                     print(f"Error decoding JSON: {error}")
                     print(f"Received line: {line}")
                     sys.exit(1)
+                except Exception as e:
+                    import traceback
+                    print(f"Error processing line: {line}")
+                    print(f"Exception {e.__class__.__name__}: {str(e)}\n{traceback.format_exc()}")
+                    sys.exit(1)
+
+        if last_result:
+            return last_result  # Return the last result if no $timings were found
+        else:
+            print("WARNING: No valid data received from the server.")
     else:
         response = post_request(test_url, inputs)
         try:

@@ -1,14 +1,14 @@
 # In this file, we define download_model
 # It runs during container build time to get model weights built into the container
 
+import asyncio
 import os
 from load_model import load_model, MODEL_IDS
 from utils import Storage
 from pathlib import Path
 from convert_to_diffusers import main as convert_to_diffusers
 from download_checkpoint import main as download_checkpoint
-from status import PercentageCompleteStatus
-import asyncio
+from event_completion_status import PercentageCompleteStatus
 
 USE_DREAMBOOTH = os.environ.get("USE_DREAMBOOTH")
 HF_AUTH_TOKEN = os.environ.get("HF_AUTH_TOKEN")

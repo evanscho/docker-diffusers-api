@@ -7,8 +7,7 @@ from io import BytesIO
 import PIL
 import json
 from load_model import load_model
-from status_update import EventTimingsTracker
-from status import PercentageCompleteStatus, PercentageCompleteStatusSender
+from event_timings_tracker import EventTimingsTracker
 import os
 import numpy as np
 import skimage
@@ -139,27 +138,24 @@ def calculate_memory_usage():
     return 0
 
 
-async def prepare_status_update_options(pipeline_run, call_inputs, response):
+async def prepare_status_update_options(pipeline_run, call_inputs, response, status_instance=None):
     status_update_options = {}
 
     if call_inputs.get("SEND_URL", None):
         status_update_options.update({"SEND_URL": call_inputs.get("SEND_URL")})
     if call_inputs.get("SIGNING_KEY", None):
         status_update_options.update({"SIGNING_KEY": call_inputs.get("SIGNING_KEY")})
-    if response:
+
+    # Add options necessary for streaming updates
+    if response and status_instance:
         status_update_options.update({"response": response})
-
-        # Start the timer to send status updates every second
-        status_instance = PercentageCompleteStatus()
-        status_sender = PercentageCompleteStatusSender(status_instance, response)
-        await status_sender.send_status(1)
-
-        status_update_options.update({"pipeline_run": pipeline_run})
         status_update_options.update({"status_instance": status_instance})
-        status_update_options.update({"status_sender": status_sender})
 
-        # Needed to cancel the status update task from another thread
-        status_update_options.update({"event_loop": asyncio.get_event_loop()})
+    # Necessary for event timings tracking
+    status_update_options.update({"pipeline_run": pipeline_run})
+
+    # Needed to cancel the PercentageCompleteStatusSender from another thread, and to run coroutines
+    status_update_options.update({"event_loop": asyncio.get_event_loop()})
 
     return status_update_options
 
@@ -190,7 +186,7 @@ cross_attention_kwargs = None
 # This function is used to perform inference (or training!) on the model with the provided inputs.
 # It's run with every server call.
 # It's an asynchronous function, meaning it's designed to handle multiple requests at the same time.
-async def inference(all_inputs: dict, response) -> dict:
+async def inference(all_inputs: dict, response, status_instance=None) -> dict:
     global model
     global last_model_filename
     global last_attn_procs
@@ -208,7 +204,7 @@ async def inference(all_inputs: dict, response) -> dict:
     result = {"$meta": {}}  # Initialize the result dictionary
 
     # Prepare options for status update, including the URL to send the status updates to
-    status_update_options = await prepare_status_update_options(pipeline_run, call_inputs, response)
+    status_update_options = await prepare_status_update_options(pipeline_run, call_inputs, response, status_instance)
     status_instance = status_update_options.get("status_instance", None)
 
     # If either model inputs or call inputs are missing, return an error
@@ -565,9 +561,7 @@ async def inference(all_inputs: dict, response) -> dict:
         # Disable gradient computation in PyTorch after training
         torch.set_grad_enabled(False)
 
-        # Update the result dictionary with the timing and memory usage information
-        mem_usage = calculate_memory_usage()
-        result.update({"$timings": pipeline_run.get_process_durations(), "$mem_usage": mem_usage})
+        result = await finalize_run(result, status_update_options)
 
         # Return the result now, since the training is done and we won't be doing inference in this same run
         return result
@@ -683,8 +677,17 @@ async def inference(all_inputs: dict, response) -> dict:
     if nsfw_content_detected:
         result = result | {"nsfw_content_detected": nsfw_content_detected}
 
-    # Add the timings and memory usage to the result dictionary
-    mem_usage = calculate_memory_usage()
-    result = result | {"$timings": pipeline_run.get_process_durations(), "$mem_usage": mem_usage}
+    result = await finalize_run(result, status_update_options)
 
     return result
+
+
+async def finalize_run(result, status_update_options):
+
+    pipeline_run = status_update_options.get("pipeline_run")
+    if pipeline_run:
+        await pipeline_run.send_event_update("completion", "start", options=status_update_options)
+
+    # Add the timings and memory usage to the result dictionary
+    mem_usage = calculate_memory_usage()
+    return result | {"$timings": pipeline_run.get_process_durations(), "$mem_usage": mem_usage}

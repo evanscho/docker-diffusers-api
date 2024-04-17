@@ -53,6 +53,10 @@ def convert_to_bytes(number, unit):
 
 
 def perform_while_tracking_progress(function_to_run, function_kwargs, process_name, status_instance):
+    # If not streaming progress, just run the function and return the result without tracking
+    if not status_instance:
+        return function_to_run(**function_kwargs)
+
     result_container = [None]  # A simple list to store the result of the thread
     print(f'Starting file transfer thread for {process_name}')
 
