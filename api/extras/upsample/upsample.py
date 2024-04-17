@@ -15,7 +15,6 @@ from gfpgan import GFPGANer
 
 from .models import models_by_type, upsamplers, face_enhancers
 from utils import Storage
-from status_update import send_status_update
 
 print(
     {
@@ -28,20 +27,27 @@ HOME = os.path.expanduser("~")
 CACHE_DIR = os.path.join(HOME, ".cache", "diffusers-api", "upsample")
 
 
+async def send_event_update(process_name: str, status: str, payload: dict = {}, options: dict = {}):
+    pipeline_run = options.get("pipeline_run", None)
+    if pipeline_run:
+        await pipeline_run.send_event_update(process_name, status, payload, options)
+
+
 def cache_path(filename):
     return os.path.join(CACHE_DIR, filename)
 
 
 async def assert_model_exists(src, filename, status_update_options, opts={}):
+    pipeline_run = status_update_options.get("pipeline_run", None)
     dest = cache_path(filename) if not opts.get("absolutePath", None) else filename
-    if not os.path.exists(dest):
-        await send_status_update("download", "start", {}, status_update_options)
+    if pipeline_run and not os.path.exists(dest):
+        await send_event_update("download", "start", {}, status_update_options)
         status_instance = status_update_options.get("status_instance", None)
         if status_instance:
             storage = Storage(src, status=status_instance)
         # await storage.download_file(dest)
         await asyncio.to_thread(storage.download_file, dest)
-        await send_status_update("download", "done", {}, status_update_options)
+        await send_event_update("download", "done", {}, status_update_options)
 
 
 async def download_models(status_update_options={}):
@@ -111,7 +117,7 @@ async def upsample(model_inputs, call_inputs, status_update_options={}, startReq
             }
         else:
             modelModel = nets[model["net"]](**model["initArgs"])
-            await send_status_update(
+            await send_event_update(
                 "load_model",
                 "start",
                 {"startRequestId": startRequestId},
@@ -127,7 +133,7 @@ async def upsample(model_inputs, call_inputs, status_update_options={}, startReq
                 pre_pad=0,
                 half=True,
             )
-            await send_status_update(
+            await send_event_update(
                 "load_model",
                 "done",
                 {"startRequestId": startRequestId},
@@ -161,7 +167,7 @@ async def upsample(model_inputs, call_inputs, status_update_options={}, startReq
     if face_enhance:
         face_enhancer = models.get("GFPGAN", None)
         if not face_enhancer:
-            await send_status_update(
+            await send_event_update(
                 "load_model",
                 "start",
                 {"startRequestId": startRequestId},
@@ -175,7 +181,7 @@ async def upsample(model_inputs, call_inputs, status_update_options={}, startReq
                 channel_multiplier=2,
                 bg_upsampler=upsampler,
             )
-            await send_status_update(
+            await send_event_update(
                 "load_model",
                 "done",
                 {"startRequestId": startRequestId},
@@ -192,7 +198,7 @@ async def upsample(model_inputs, call_inputs, status_update_options={}, startReq
     # bytes = BytesIO(base64.decodebytes(bytes(model_inputs["input_image"], "utf-8")))
     img = cv2.imdecode(image_np, cv2.IMREAD_UNCHANGED)
 
-    await send_status_update("inference", "start", {"startRequestId": startRequestId}, status_update_options)
+    await send_event_update("inference", "start", {"startRequestId": startRequestId}, status_update_options)
 
     # Run the model
     # with autocast("cuda"):
@@ -206,7 +212,7 @@ async def upsample(model_inputs, call_inputs, status_update_options={}, startReq
 
     image_base64 = base64.b64encode(cv2.imencode(".jpg", output)[1]).decode()
 
-    await send_status_update("inference", "done", {"startRequestId": startRequestId}, status_update_options)
+    await send_event_update("inference", "done", {"startRequestId": startRequestId}, status_update_options)
 
     # Return the results as a dictionary
     return {"$meta": {}, "image_base64": image_base64}

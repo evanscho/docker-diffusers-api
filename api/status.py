@@ -2,7 +2,9 @@ import json
 import asyncio
 
 
-class Status:
+class PercentageCompleteStatus:
+    """Stores and updates the completion status of the current process"""
+
     def __init__(self):
         self.type = "init"
         self.progress = 0.0
@@ -16,7 +18,9 @@ class Status:
         return {"type": self.type, "progress": f"{progress_percentage}%"}
 
 
-class StatusSender:
+class PercentageCompleteStatusSender:
+    """Sends completion status updates periodically (for use when streaming updates to a client)"""
+
     def __init__(self, status, response, loop=None):
         self.status = status
         self.response = response

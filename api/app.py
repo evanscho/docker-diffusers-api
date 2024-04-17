@@ -7,8 +7,8 @@ from io import BytesIO
 import PIL
 import json
 from load_model import load_model
-from status_update import send_status_update, get_process_durations, initialize_session
-from status import Status, StatusSender
+from status_update import EventTimingsTracker
+from status import PercentageCompleteStatus, PercentageCompleteStatusSender
 import os
 import numpy as np
 import skimage
@@ -68,7 +68,7 @@ async def init():
 
     # Send a status update indicating that the initialization has started
 
-    await send_status_update(
+    await EventTimingsTracker().send_event_update(
         "init",
         "start",
         {
@@ -95,7 +95,7 @@ async def init():
         model = None
 
     # Send a status update indicating that the initialization is done
-    await send_status_update("init", "done")
+    await EventTimingsTracker().send_event_update("init", "done")
 
 
 def decodeBase64Image(imageStr: str, name: str) -> PIL.Image:
@@ -139,20 +139,22 @@ def calculate_memory_usage():
     return 0
 
 
-async def prepare_status_update_options(call_inputs, response):
+async def prepare_status_update_options(pipeline_run, call_inputs, response):
     status_update_options = {}
+
     if call_inputs.get("SEND_URL", None):
         status_update_options.update({"SEND_URL": call_inputs.get("SEND_URL")})
-    if call_inputs.get("SIGN_KEY", None):
-        status_update_options.update({"SIGN_KEY": call_inputs.get("SIGN_KEY")})
+    if call_inputs.get("SIGNING_KEY", None):
+        status_update_options.update({"SIGNING_KEY": call_inputs.get("SIGNING_KEY")})
     if response:
         status_update_options.update({"response": response})
 
         # Start the timer to send status updates every second
-        status_instance = Status()
-        status_sender = StatusSender(status_instance, response)
+        status_instance = PercentageCompleteStatus()
+        status_sender = PercentageCompleteStatusSender(status_instance, response)
         await status_sender.send_status(1)
 
+        status_update_options.update({"pipeline_run": pipeline_run})
         status_update_options.update({"status_instance": status_instance})
         status_update_options.update({"status_sender": status_sender})
 
@@ -160,6 +162,24 @@ async def prepare_status_update_options(call_inputs, response):
         status_update_options.update({"event_loop": asyncio.get_event_loop()})
 
     return status_update_options
+
+
+def env_variables_masked():
+    """Masks sensitive environmental variables"""
+    env_vars = os.environ.copy()
+    for var in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "HF_AUTH_TOKEN"]:
+        if var in env_vars:
+            env_vars[var] = "***"
+    return env_vars
+
+
+def print_inputs_and_env_variables(inputs):
+    print()  # Add a newline before the inputs for spacing
+    print("Environment variables:")
+    print(env_variables_masked())
+    print()
+    print("Inputs:")
+    print(json.dumps(truncateInputs(inputs), indent=2))
 
 
 last_attn_procs = None
@@ -177,8 +197,9 @@ async def inference(all_inputs: dict, response) -> dict:
     global last_lora_weights
     global cross_attention_kwargs
 
-    initialize_session()  # Start new session since starting a new inference
-    print(json.dumps(truncateInputs(all_inputs), indent=2))  # Print the inputs for debugging purposes
+    # Start new pipeline run (for timing each step + debug data) since starting a new inference
+    pipeline_run = EventTimingsTracker().start_new_run()
+    print_inputs_and_env_variables(all_inputs)
 
     # Extract model inputs and call inputs from the all_inputs dictionary
     model_inputs = all_inputs.get("modelInputs", None)
@@ -187,7 +208,7 @@ async def inference(all_inputs: dict, response) -> dict:
     result = {"$meta": {}}  # Initialize the result dictionary
 
     # Prepare options for status update, including the URL to send the status updates to
-    status_update_options = await prepare_status_update_options(call_inputs, response)
+    status_update_options = await prepare_status_update_options(pipeline_run, call_inputs, response)
     status_instance = status_update_options.get("status_instance", None)
 
     # If either model inputs or call inputs are missing, return an error
@@ -283,7 +304,7 @@ async def inference(all_inputs: dict, response) -> dict:
             if model:
                 model.to("cpu")
 
-            await send_status_update("load_model", "start", {"startRequestId": startRequestId}, status_update_options)
+            await pipeline_run.send_event_update("load_model", "start", {"startRequestId": startRequestId}, status_update_options)
 
             # Load the model
             model = perform_while_tracking_progress(load_model, {
@@ -295,7 +316,7 @@ async def inference(all_inputs: dict, response) -> dict:
                 "pipeline_class": pipeline_class if pipeline_name else None,
             }, "load_model", status_instance)
 
-            await send_status_update("load_model", "done", {"startRequestId": startRequestId}, status_update_options)
+            await pipeline_run.send_event_update("load_model", "done", {"startRequestId": startRequestId}, status_update_options)
             last_model_filename = model_filename
             last_attn_procs = None
             last_lora_weights = None
@@ -546,12 +567,12 @@ async def inference(all_inputs: dict, response) -> dict:
 
         # Update the result dictionary with the timing and memory usage information
         mem_usage = calculate_memory_usage()
-        result.update({"$timings": get_process_durations(), "$mem_usage": mem_usage})
+        result.update({"$timings": pipeline_run.get_process_durations(), "$mem_usage": mem_usage})
 
         # Return the result now, since the training is done and we won't be doing inference in this same run
         return result
 
-    await send_status_update("inference", "start", {"startRequestId": startRequestId}, status_update_options)
+    await pipeline_run.send_event_update("inference", "start", {"startRequestId": startRequestId}, status_update_options)
 
     # Get the seed from the model inputs if it exists, and create a generator with it or with a random seed
     # Do this after dreambooth as dreambooth accepts a seed int directly.
@@ -571,7 +592,7 @@ async def inference(all_inputs: dict, response) -> dict:
     # If the user wants a progress message for each step, create a callback function to do so
     if model_inputs.get("callback_steps", None):
         def callback(step: int, timestep: int, callback_kwargs: dict):
-            coroutine = send_status_update(
+            coroutine = pipeline_run.send_event_update(
                 "inference",
                 "progress",
                 {"startRequestId": startRequestId, "step": step},
@@ -649,7 +670,7 @@ async def inference(all_inputs: dict, response) -> dict:
         images_base64.append(base64.b64encode(buffered.getvalue()).decode("utf-8"))
 
     # Send a 'done' status update for the inference
-    await send_status_update("inference", "done", {"startRequestId": startRequestId}, status_update_options)
+    await pipeline_run.send_event_update("inference", "done", {"startRequestId": startRequestId}, status_update_options)
 
     # Add the images to the result dictionary
     if len(images_base64) > 1:
@@ -664,6 +685,6 @@ async def inference(all_inputs: dict, response) -> dict:
 
     # Add the timings and memory usage to the result dictionary
     mem_usage = calculate_memory_usage()
-    result = result | {"$timings": get_process_durations(), "$mem_usage": mem_usage}
+    result = result | {"$timings": pipeline_run.get_process_durations(), "$mem_usage": mem_usage}
 
     return result

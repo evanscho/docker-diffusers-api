@@ -7,7 +7,7 @@ from utils import Storage
 from pathlib import Path
 from convert_to_diffusers import main as convert_to_diffusers
 from download_checkpoint import main as download_checkpoint
-from status import Status
+from status import PercentageCompleteStatus
 import asyncio
 
 USE_DREAMBOOTH = os.environ.get("USE_DREAMBOOTH")
@@ -20,11 +20,10 @@ Path(MODELS_DIR).mkdir(parents=True, exist_ok=True)
 
 
 # i.e. don't run during build
-async def send_status_update(process_name: str, status: str, payload: dict = {}, options: dict = {}):
-    if RUNTIME_DOWNLOADS:
-        from status_update import send_status_update as _send_status_update
-
-        await _send_status_update(process_name, status, payload, options)
+async def send_event_update(process_name: str, status: str, payload: dict = {}, options: dict = {}):
+    pipeline_run = options.get("pipeline_run", None)
+    if RUNTIME_DOWNLOADS and pipeline_run:
+        await pipeline_run.send_event_update(process_name, status, payload, options)
 
 
 def get_model_filename(model_id: str, model_revision):
@@ -77,7 +76,7 @@ async def download_model(
         # Create an appropriate Storage object for the model, depending on whether the URL is for S3 or HTTP
         status_instance = status_update_options.get("status_instance", None)
         if not status_instance:
-            status_instance = Status()
+            status_instance = PercentageCompleteStatus()
         storage = Storage(
             model_url, default_path=model_filename + ".tar.zst", status=status_instance
         )

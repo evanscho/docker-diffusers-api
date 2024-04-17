@@ -67,7 +67,6 @@ from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_
 from diffusers.utils.torch_utils import is_compiled_module
 
 # DDA
-from status_update import send_status_update as _send_status_update
 from utils import Storage
 import subprocess
 import re
@@ -80,11 +79,12 @@ import traceback
 HF_AUTH_TOKEN = os.getenv("HF_AUTH_TOKEN")
 
 
-def send_status_update(process_name: str, status: str, payload: dict = {}, options: dict = {}):
+def send_event_update(process_name: str, status: str, payload: dict = {}, options: dict = {}):
+    pipeline_run = options.get("pipeline_run", None)
+    event_loop = options.get("event_loop", None)
     try:
-        event_loop = options.get("event_loop", None)
-        if event_loop:
-            asyncio.run_coroutine_threadsafe(_send_status_update(
+        if pipeline_run and event_loop:
+            asyncio.run_coroutine_threadsafe(pipeline_run.send_event_update(
                 process_name, status, payload, options), event_loop)
         else:
             logging.error("No event loop to send status update")
@@ -247,7 +247,7 @@ def TrainDreamBooth(model_id: str, pipeline, model_inputs, call_inputs, status_u
         print(filename)
 
         # fp16 model timings: zip 1m20s, tar+zstd 4s and a tiny bit smaller!
-        send_status_update("compress", "start", {}, status_update_options)
+        send_event_update("compress", "start", {}, status_update_options)
 
         # TODO, steaming upload (turns out docker disk write is super slow)
         subprocess.run(
@@ -256,12 +256,12 @@ def TrainDreamBooth(model_id: str, pipeline, model_inputs, call_inputs, status_u
             check=True,  # TODO, rather don't raise and return an error in JSON
         )
 
-        send_status_update("compress", "done", {}, status_update_options)
+        send_event_update("compress", "done", {}, status_update_options)
         subprocess.run(["ls", "-l", filename])
 
-        send_status_update("upload", "start", {}, status_update_options)
+        send_event_update("upload", "start", {}, status_update_options)
         upload_result = storage.upload_file(filename, filename)
-        send_status_update("upload", "done", {}, status_update_options)
+        send_event_update("upload", "done", {}, status_update_options)
         print(upload_result)
         os.remove(filename)
 
@@ -1061,7 +1061,7 @@ def main(args, init_pipeline, status_update_options):  # DDA
     )
 
     # DDA
-    send_status_update("training", "start", {}, status_update_options)
+    send_event_update("training", "start", {}, status_update_options)
     if status_instance:
         status_instance.update("training", 1000)
 
@@ -1240,7 +1240,7 @@ def main(args, init_pipeline, status_update_options):  # DDA
 
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
-    send_status_update("training", "done", {}, status_update_options)  # DDA
+    send_event_update("training", "done", {}, status_update_options)  # DDA
 
     if accelerator.is_main_process:
         pipeline_args = {}
@@ -1278,7 +1278,7 @@ def main(args, init_pipeline, status_update_options):  # DDA
         if args.push_to_hub:
             upload_to_huggingface(repo_id, images, pipeline, args, status_update_options)
 
-        send_status_update("upload", "done", {}, status_update_options)  # DDA
+        send_event_update("upload", "done", {}, status_update_options)  # DDA
 
     accelerator.end_training()
 
@@ -1286,7 +1286,7 @@ def main(args, init_pipeline, status_update_options):  # DDA
 
 
 def upload_to_huggingface(repo_id, images, pipeline, args, status_update_options):  # DDA
-    send_status_update("upload", "start", {}, status_update_options)  # DDA
+    send_event_update("upload", "start", {}, status_update_options)  # DDA
     save_model_card(
         repo_id,
         images=images,
