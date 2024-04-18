@@ -1,5 +1,4 @@
 import re
-import os
 import time
 import requests
 from tqdm import tqdm
@@ -8,13 +7,15 @@ import urllib.parse
 
 
 def get_now():
+    """Returns the current time in milliseconds."""
     return round(time.time() * 1000)
 
 
 class HTTPStorage(BaseStorage):
     @staticmethod
     def test(url):
-        return re.search(r"^https?://", url)
+        """Checks if the URL is an HTTP or HTTPS URL."""
+        return re.match(r"^https?://", url) is not None
 
     def __init__(self, url, **kwargs):
         super().__init__(url, **kwargs)
@@ -23,31 +24,29 @@ class HTTPStorage(BaseStorage):
         if len(parts) > 1:
             self.query = urllib.parse.parse_qs(parts[1])
 
-    def upload_file(self, source, dest):
-        raise RuntimeError("HTTP PUT not implemented yet")
+    def __init__(self, url, **kwargs):
+        """Initializes HTTPStorage with a given URL and optional extra parameters."""
+        super().__init__(url, **kwargs)
+        self.url, sep, query_string = self.url.partition('#')
+        self.query = urllib.parse.parse_qs(query_string) if query_string else {}
 
-    def download_file(self, fname):
-        print(f"Downloading {self.url} to {fname}...")
-        resp = requests.get(self.url, stream=True)
-        total = int(resp.headers.get("content-length", 0))
-        content_disposition = resp.headers.get("content-disposition")
-        if content_disposition:
-            filename_search = re.search('filename="(.+)"', content_disposition)
-            if filename_search:
-                self.filename = filename_search.group(1)
-        else:
-            print("Warning: content-disposition header is not found in the response.")
-        # Can also replace 'file' with a io.BytesIO object
-        with open(fname, "wb") as file, tqdm(
-            desc="Downloading",
-            total=total,
-            unit="iB",
-            unit_scale=True,
-            unit_divisor=1024,
-        ) as bar:
-            total_written = 0
-            for data in resp.iter_content(chunk_size=1024):
-                size = file.write(data)
-                bar.update(size)
-                total_written += size
-                self.updateStatus("download", total_written / total)
+    def upload_file(self, source, dest):
+        """Placeholder for HTTP upload functionality, currently not implemented."""
+        raise NotImplementedError("HTTP PUT not implemented yet")
+
+    def download_file(self, filename):
+        """Downloads a file from the HTTP URL to a specified local filename."""
+        print(f"Downloading {self.url} to {filename}...")
+        with requests.get(self.url, stream=True) as resp:
+            resp.raise_for_status()  # This will raise an HTTPError if the HTTP request returned an unsuccessful status code
+            total = int(resp.headers.get("content-length", 0))
+
+            with open(filename, "wb") as file, tqdm(  # Can also replace 'file' with a io.BytesIO object
+                desc="Downloading", total=total, unit='iB', unit_scale=True, unit_divisor=1024
+            ) as bar:
+                total_written = 0
+                for data in resp.iter_content(chunk_size=1024):
+                    size = file.write(data)
+                    bar.update(size)
+                    total_written += size
+                    self.update_status("download", total_written / total)

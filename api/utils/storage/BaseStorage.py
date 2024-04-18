@@ -6,16 +6,17 @@ import xtarfile as tarfile
 
 
 class BaseArchive(ABC):
-    def __init__(self, path, status=None):
+    def __init__(self, path: str, status=None):
         self.path = path
         self.status = status
 
-    def updateStatus(self, type, progress):
+    def update_status(self, type: str, progress: float):
         if self.status:
             self.status.update(type, progress)
 
-    def extract(self):
-        print("TODO")
+    def extract(self, dir: str, dry_run: bool = False):
+        """Extract the archive to a directory."""
+        pass  # DDA: TODO
 
     def splitext(self):
         base, ext = os.path.splitext(self.path)
@@ -25,59 +26,55 @@ class BaseArchive(ABC):
 
 class TarArchive(BaseArchive):
     @staticmethod
-    def test(path):
-        return re.search(r"\.tar", path)
+    def test(path: str):
+        return re.search(r"\.tar(\.gz|\.bz2)?$", path)
 
-    def extract(self, dir, dry_run=False):
-        self.updateStatus("extract", 0)
+    def extract(self, dir: str = None, dry_run: bool = False):
+        self.update_status("extract", 0)
         if not dir:
-            base, ext, subext = self.splitext()
             parent_dir = os.path.dirname(self.path)
-            dir = os.path.join(parent_dir, base)
+            base_filename = self.splitext()[0]
+            dir = os.path.join(parent_dir, base_filename)
 
         if not dry_run:
-            os.mkdir(dir)
-
-            def track_progress(tar):
-                i = 0
-                members = tar.getmembers()
-                for member in members:
-                    i += 1
-                    self.updateStatus("extract", i / len(members))
-                    yield member
-
-            print("Extracting to " + dir)
+            os.makedirs(dir, exist_ok=True)
             with tarfile.open(self.path, "r") as tar:
-                tar.extractall(path=dir, members=track_progress(tar))
-                tar.close()
+                members = tar.getmembers()
+                total = len(members)
+                for i, member in enumerate(members, 1):
+                    tar.extract(member, path=dir)
+                    self.update_status("extract", i / total)
+
             subprocess.run(["ls", "-l", dir])
             os.remove(self.path)
 
-        self.updateStatus("extract", 1)
-        return dir  # , base, ext, subext
+        self.update_status("extract", 1)
+        return dir
 
 
-archiveClasses = [TarArchive]
+archive_classes = [TarArchive]
 
 
-def Archive(path, **kwargs):
-    for ArchiveClass in archiveClasses:
+def get_archive_class(path: str, **kwargs):
+    for ArchiveClass in archive_classes:
         if ArchiveClass.test(path):
             return ArchiveClass(path, **kwargs)
+    return None
 
 
 class BaseStorage(ABC):
     @staticmethod
     @abstractmethod
-    def test(url):
-        return re.search(r"^https?://", url)
+    def test(url: str):
+        """Check if the URL is valid for this storage type."""
+        pass
 
-    def __init__(self, url, **kwargs):
+    def __init__(self, url: str, **kwargs):
         self.url = url
         self.status = kwargs.get("status", None)
         self.query = {}
 
-    def updateStatus(self, type, progress):
+    def update_status(self, type: str, progress: float):
         if self.status:
             self.status.update(type, progress)
 
@@ -87,27 +84,27 @@ class BaseStorage(ABC):
         return base, ext, subext
 
     def get_filename(self):
-        return self.url.split("/").pop()
+        return os.path.basename(self.url)
 
     @abstractmethod
-    def download_file(self, dest):
+    def download_file(self, dest: str):
         """Download the file to `dest`"""
         pass
 
-    def download_and_extract(self, fname, dir=None, dry_run=False):
+    def download_and_extract(self, filename: str = None, dir: str = None, dry_run: bool = False):
         """
         Downloads the file, and if it's an archive, extract it too.  Returns
-        the filename if not, or directory name (fname without extension) if
+        the filename if not, or directory name (filename without extension) if
         it was.
         """
-        if not fname:
-            fname = self.get_filename()
+        filename = filename or self.get_filename()
+        archive_class = get_archive_class(filename)
+        if archive_class:
+            archive = archive_class(filename, status=self.status)
 
-        archive = Archive(fname, status=self.status)
-        if archive:
             # TODO, streaming pipeline
-            self.download_file(fname)
-            return archive.extract(dir)
+            self.download_file(filename)
+            return archive.extract(dir, dry_run)
         else:
-            self.download_file(fname)
-            return fname
+            self.download_file(filename)
+            return filename
