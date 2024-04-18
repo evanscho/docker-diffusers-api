@@ -1051,196 +1051,199 @@ def main(args, init_pipeline, status_update_options):  # DDA
     else:
         initial_global_step = 0
 
-    progress_bar = tqdm(
+    # DDA
+    send_event_update("training", "start", {}, status_update_options)
+
+    with tqdm(
         range(0, args.max_train_steps),
         initial=initial_global_step,
         desc="Steps",
         # Only show the progress bar once on each machine.
         disable=not accelerator.is_local_main_process,
-    )
+    ) as progress_bar:
 
-    # DDA
-    send_event_update("training", "start", {}, status_update_options)
-    if status_instance:
-        status_instance.update("training", 1000)
+        for epoch in range(first_epoch, args.num_train_epochs):
+            unet.train()
+            if args.train_text_encoder:
+                text_encoder.train()
+            for step, batch in enumerate(train_dataloader):
+                with accelerator.accumulate(unet):
+                    pixel_values = batch["pixel_values"].to(dtype=weight_dtype)
 
-    for epoch in range(first_epoch, args.num_train_epochs):
-        unet.train()
-        if args.train_text_encoder:
-            text_encoder.train()
-        for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(unet):
-                pixel_values = batch["pixel_values"].to(dtype=weight_dtype)
-
-                if vae is not None:
-                    # Convert images to latent space
-                    model_input = vae.encode(batch["pixel_values"].to(
-                        dtype=weight_dtype)).latent_dist.sample()
-                    model_input = model_input * vae.config.scaling_factor
-                else:
-                    model_input = pixel_values
-
-                # Sample noise that we'll add to the model input
-                if args.offset_noise:
-                    noise = torch.randn_like(model_input) + 0.1 * torch.randn(
-                        model_input.shape[0], model_input.shape[1], 1, 1, device=model_input.device
-                    )
-                else:
-                    noise = torch.randn_like(model_input)
-                bsz, channels, height, width = model_input.shape
-                # Sample a random timestep for each image
-                timesteps = torch.randint(
-                    0, noise_scheduler.config.num_train_timesteps, (bsz,), device=model_input.device
-                )
-                timesteps = timesteps.long()
-
-                # Add noise to the model input according to the noise magnitude at each timestep
-                # (this is the forward diffusion process)
-                noisy_model_input = noise_scheduler.add_noise(model_input, noise, timesteps)
-
-                # Get the text embedding for conditioning
-                if args.pre_compute_text_embeddings:
-                    encoder_hidden_states = batch["input_ids"]
-                else:
-                    encoder_hidden_states = encode_prompt(
-                        text_encoder,
-                        batch["input_ids"],
-                        batch["attention_mask"],
-                        text_encoder_use_attention_mask=args.text_encoder_use_attention_mask,
-                    )
-
-                if unwrap_model(unet).config.in_channels == channels * 2:
-                    noisy_model_input = torch.cat([noisy_model_input, noisy_model_input], dim=1)
-
-                if args.class_labels_conditioning == "timesteps":
-                    class_labels = timesteps
-                else:
-                    class_labels = None
-
-                # Predict the noise residual
-                model_pred = unet(
-                    noisy_model_input, timesteps, encoder_hidden_states, class_labels=class_labels, return_dict=False
-                )[0]
-
-                if model_pred.shape[1] == 6:
-                    model_pred, _ = torch.chunk(model_pred, 2, dim=1)
-
-                # Get the target for loss depending on the prediction type
-                if noise_scheduler.config.prediction_type == "epsilon":
-                    target = noise
-                elif noise_scheduler.config.prediction_type == "v_prediction":
-                    target = noise_scheduler.get_velocity(model_input, noise, timesteps)
-                else:
-                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
-
-                if args.with_prior_preservation:
-                    # Chunk the noise and model_pred into two parts and compute the loss on each part separately.
-                    model_pred, model_pred_prior = torch.chunk(model_pred, 2, dim=0)
-                    target, target_prior = torch.chunk(target, 2, dim=0)
-                    # Compute prior loss
-                    prior_loss = F.mse_loss(model_pred_prior.float(), target_prior.float(), reduction="mean")
-
-                # Compute instance loss
-                if args.snr_gamma is None:
-                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
-                else:
-                    # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
-                    # Since we predict the noise instead of x_0, the original formulation is slightly changed.
-                    # This is discussed in Section 4.2 of the same paper.
-                    snr = compute_snr(noise_scheduler, timesteps)
-                    base_weight = (
-                        torch.stack([snr, args.snr_gamma * torch.ones_like(timesteps)],
-                                    dim=1).min(dim=1)[0] / snr
-                    )
-
-                    if noise_scheduler.config.prediction_type == "v_prediction":
-                        # Velocity objective needs to be floored to an SNR weight of one.
-                        mse_loss_weights = base_weight + 1
+                    if vae is not None:
+                        # Convert images to latent space
+                        model_input = vae.encode(batch["pixel_values"].to(
+                            dtype=weight_dtype)).latent_dist.sample()
+                        model_input = model_input * vae.config.scaling_factor
                     else:
-                        # Epsilon and sample both use the same loss weights.
-                        mse_loss_weights = base_weight
-                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
-                    loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
-                    loss = loss.mean()
+                        model_input = pixel_values
 
-                if args.with_prior_preservation:
-                    # Add the prior loss to the instance loss.
-                    loss = loss + args.prior_loss_weight * prior_loss
-
-                accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    params_to_clip = (
-                        itertools.chain(unet.parameters(), text_encoder.parameters())
-                        if args.train_text_encoder
-                        else unet.parameters()
+                    # Sample noise that we'll add to the model input
+                    if args.offset_noise:
+                        noise = torch.randn_like(model_input) + 0.1 * torch.randn(
+                            model_input.shape[0], model_input.shape[1], 1, 1, device=model_input.device
+                        )
+                    else:
+                        noise = torch.randn_like(model_input)
+                    bsz, channels, height, width = model_input.shape
+                    # Sample a random timestep for each image
+                    timesteps = torch.randint(
+                        0, noise_scheduler.config.num_train_timesteps, (bsz,), device=model_input.device
                     )
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad(set_to_none=args.set_grads_to_none)
+                    timesteps = timesteps.long()
 
-            # Checks if the accelerator has performed an optimization step behind the scenes
-            if accelerator.sync_gradients:
-                progress_bar.update(1)
-                if status_instance:
-                    status_instance.update("training", global_step/args.max_train_steps)
-                global_step += 1
+                    # Add noise to the model input according to the noise magnitude at each timestep
+                    # (this is the forward diffusion process)
+                    noisy_model_input = noise_scheduler.add_noise(model_input, noise, timesteps)
 
-                if accelerator.is_main_process:
-                    if global_step % args.checkpointing_steps == 0:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                        if args.checkpoints_total_limit is not None:
-                            checkpoints = os.listdir(args.output_dir)
-                            checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
-                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
-
-                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                            if len(checkpoints) >= args.checkpoints_total_limit:
-                                num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
-                                removing_checkpoints = checkpoints[0:num_to_remove]
-
-                                logger.info(
-                                    f"{len(checkpoints)} checkpoints already exist, \
-                                        removing {len(removing_checkpoints)} checkpoints"
-                                )
-                                logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
-
-                                for removing_checkpoint in removing_checkpoints:
-                                    removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
-
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        pipeline.save_pretrained(save_path)  # DDA
-                        accelerator.save_state(save_path)
-                        logger.info(f"Saved state to {save_path}")
-
-                    images = []
-
-                    if args.validation_prompt is not None and global_step % args.validation_steps == 0:
-                        images = log_validation(
-                            unwrap_model(text_encoder) if text_encoder is not None else text_encoder,
-                            tokenizer,
-                            unwrap_model(unet),
-                            vae,
-                            args,
-                            accelerator,
-                            weight_dtype,
-                            global_step,
-                            validation_prompt_encoder_hidden_states,
-                            validation_prompt_negative_prompt_embeds,
+                    # Get the text embedding for conditioning
+                    if args.pre_compute_text_embeddings:
+                        encoder_hidden_states = batch["input_ids"]
+                    else:
+                        encoder_hidden_states = encode_prompt(
+                            text_encoder,
+                            batch["input_ids"],
+                            batch["attention_mask"],
+                            text_encoder_use_attention_mask=args.text_encoder_use_attention_mask,
                         )
 
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
-            progress_bar.set_postfix(**logs)
-            accelerator.log(logs, step=global_step)
+                    if unwrap_model(unet).config.in_channels == channels * 2:
+                        noisy_model_input = torch.cat([noisy_model_input, noisy_model_input], dim=1)
 
-            if global_step >= args.max_train_steps:
-                break
+                    if args.class_labels_conditioning == "timesteps":
+                        class_labels = timesteps
+                    else:
+                        class_labels = None
+
+                    # Predict the noise residual
+                    model_pred = unet(
+                        noisy_model_input, timesteps, encoder_hidden_states, class_labels=class_labels, return_dict=False
+                    )[0]
+
+                    if model_pred.shape[1] == 6:
+                        model_pred, _ = torch.chunk(model_pred, 2, dim=1)
+
+                    # Get the target for loss depending on the prediction type
+                    if noise_scheduler.config.prediction_type == "epsilon":
+                        target = noise
+                    elif noise_scheduler.config.prediction_type == "v_prediction":
+                        target = noise_scheduler.get_velocity(model_input, noise, timesteps)
+                    else:
+                        raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+
+                    if args.with_prior_preservation:
+                        # Chunk the noise and model_pred into two parts and compute the loss on each part separately.
+                        model_pred, model_pred_prior = torch.chunk(model_pred, 2, dim=0)
+                        target, target_prior = torch.chunk(target, 2, dim=0)
+                        # Compute prior loss
+                        prior_loss = F.mse_loss(model_pred_prior.float(),
+                                                target_prior.float(), reduction="mean")
+
+                    # Compute instance loss
+                    if args.snr_gamma is None:
+                        loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                    else:
+                        # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
+                        # Since we predict the noise instead of x_0, the original formulation is slightly changed.
+                        # This is discussed in Section 4.2 of the same paper.
+                        snr = compute_snr(noise_scheduler, timesteps)
+                        base_weight = (
+                            torch.stack([snr, args.snr_gamma * torch.ones_like(timesteps)],
+                                        dim=1).min(dim=1)[0] / snr
+                        )
+
+                        if noise_scheduler.config.prediction_type == "v_prediction":
+                            # Velocity objective needs to be floored to an SNR weight of one.
+                            mse_loss_weights = base_weight + 1
+                        else:
+                            # Epsilon and sample both use the same loss weights.
+                            mse_loss_weights = base_weight
+                        loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
+                        loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
+                        loss = loss.mean()
+
+                    if args.with_prior_preservation:
+                        # Add the prior loss to the instance loss.
+                        loss = loss + args.prior_loss_weight * prior_loss
+
+                    accelerator.backward(loss)
+                    if accelerator.sync_gradients:
+                        params_to_clip = (
+                            itertools.chain(unet.parameters(), text_encoder.parameters())
+                            if args.train_text_encoder
+                            else unet.parameters()
+                        )
+                        accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad(set_to_none=args.set_grads_to_none)
+
+                # Checks if the accelerator has performed an optimization step behind the scenes
+                if accelerator.sync_gradients:
+                    progress_bar.update(1)
+
+                    # ESS: Update event timing tracker if streaming result
+                    if status_instance:
+                        status_instance.update("training", global_step/args.max_train_steps)
+
+                    global_step += 1
+
+                    if accelerator.is_main_process:
+                        if global_step % args.checkpointing_steps == 0:
+                            # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                            if args.checkpoints_total_limit is not None:
+                                checkpoints = os.listdir(args.output_dir)
+                                checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
+                                checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+
+                                # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+                                if len(checkpoints) >= args.checkpoints_total_limit:
+                                    num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
+                                    removing_checkpoints = checkpoints[0:num_to_remove]
+
+                                    logger.info(
+                                        f"{len(checkpoints)} checkpoints already exist, \
+                                            removing {len(removing_checkpoints)} checkpoints"
+                                    )
+                                    logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+
+                                    for removing_checkpoint in removing_checkpoints:
+                                        removing_checkpoint = os.path.join(
+                                            args.output_dir, removing_checkpoint)
+                                        shutil.rmtree(removing_checkpoint)
+
+                            save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                            pipeline.save_pretrained(save_path)  # DDA
+                            accelerator.save_state(save_path)
+                            logger.info(f"Saved state to {save_path}")
+
+                        images = []
+
+                        if args.validation_prompt is not None and global_step % args.validation_steps == 0:
+                            images = log_validation(
+                                unwrap_model(text_encoder) if text_encoder is not None else text_encoder,
+                                tokenizer,
+                                unwrap_model(unet),
+                                vae,
+                                args,
+                                accelerator,
+                                weight_dtype,
+                                global_step,
+                                validation_prompt_encoder_hidden_states,
+                                validation_prompt_negative_prompt_embeds,
+                            )
+
+                logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+                progress_bar.set_postfix(**logs)
+                accelerator.log(logs, step=global_step)
+
+                if global_step >= args.max_train_steps:
+                    break
+
+    send_event_update("training", "done", {}, status_update_options)  # DDA
 
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
-    send_event_update("training", "done", {}, status_update_options)  # DDA
-
     if accelerator.is_main_process:
         pipeline_args = {}
 
