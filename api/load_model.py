@@ -1,15 +1,10 @@
 import os
 from diffusers import pipelines as diffusers_pipelines, AutoPipelineForText2Image
-from get_scheduler import get_scheduler, DEFAULT_SCHEDULER
+from get_scheduler import get_scheduler
 from precision import torch_dtype_from_precision
 from device import device
 import time
-
-HF_AUTH_TOKEN = os.getenv("HF_AUTH_TOKEN")
-PIPELINE = os.getenv("PIPELINE")
-USE_DREAMBOOTH = True if os.getenv("USE_DREAMBOOTH") == "1" else False
-HOME = os.path.expanduser("~")
-MODELS_DIR = os.path.join(HOME, ".cache", "diffusers-api")
+from lib.vars import HF_AUTH_TOKEN, PIPELINE, MODELS_DIR, DEFAULT_SCHEDULER
 
 
 MODEL_IDS = [
@@ -59,7 +54,7 @@ def load_model(
         pipeline_class = AutoPipelineForText2Image
 
     # Get the pipeline class, either from the provided pipeline_class or by retrieving it from diffusers_pipelines
-    pipeline = pipeline_class if PIPELINE == "ALL" else getattr(diffusers_pipelines, PIPELINE)
+    pipeline = pipeline_class if PIPELINE == "ANY" else getattr(diffusers_pipelines, PIPELINE)
     print("pipeline", pipeline_class)
 
     # Print the model that's being loaded or downloaded

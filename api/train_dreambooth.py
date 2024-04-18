@@ -73,10 +73,9 @@ import re
 import asyncio
 from file_transfer_progress import perform_while_tracking_progress
 import traceback
+from lib.vars import HF_AUTH_TOKEN
 
 # Our original code in docker-diffusers-api:
-
-HF_AUTH_TOKEN = os.getenv("HF_AUTH_TOKEN")
 
 
 def send_event_update(process_name: str, status: str, payload: dict = {}, options: dict = {}):

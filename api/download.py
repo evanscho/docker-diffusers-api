@@ -3,19 +3,14 @@
 
 import asyncio
 import os
-from load_model import load_model, MODEL_IDS
+from load_model import load_model
 from utils import Storage
 from pathlib import Path
 from convert_to_diffusers import main as convert_to_diffusers
 from download_checkpoint import main as download_checkpoint
 from event_completion_status import PercentageCompleteStatus
+from lib.vars import MODEL_URL, MODEL_ID, HF_MODEL_ID, MODEL_REVISION, MODEL_PRECISION, CHECKPOINT_URL, CHECKPOINT_CONFIG_URL, MODELS_DIR, RUNTIME_DOWNLOADS
 
-USE_DREAMBOOTH = os.environ.get("USE_DREAMBOOTH")
-HF_AUTH_TOKEN = os.environ.get("HF_AUTH_TOKEN")
-RUNTIME_DOWNLOADS = os.environ.get("RUNTIME_DOWNLOADS")
-
-HOME = os.path.expanduser("~")
-MODELS_DIR = os.path.join(HOME, ".cache", "diffusers-api")
 Path(MODELS_DIR).mkdir(parents=True, exist_ok=True)
 
 
@@ -119,12 +114,12 @@ async def download_model(
 if __name__ == "__main__":
     asyncio.run(
         download_model(
-            model_url=os.environ.get("MODEL_URL"),
-            model_id=os.environ.get("MODEL_ID"),
-            hf_model_id=os.environ.get("HF_MODEL_ID"),
-            model_revision=os.environ.get("MODEL_REVISION"),
-            model_precision=os.environ.get("MODEL_PRECISION"),
-            checkpoint_url=os.environ.get("CHECKPOINT_URL"),
-            checkpoint_config_url=os.environ.get("CHECKPOINT_CONFIG_URL"),
+            model_url=MODEL_URL,
+            model_id=MODEL_ID,
+            hf_model_id=HF_MODEL_ID,
+            model_revision=MODEL_REVISION,
+            model_precision=MODEL_PRECISION,
+            checkpoint_url=CHECKPOINT_URL,
+            checkpoint_config_url=CHECKPOINT_CONFIG_URL,
         )
     )

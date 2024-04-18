@@ -42,19 +42,13 @@ from diffusers import (
 
 from lib.textual_inversions import handle_textual_inversions
 from lib.prompts import prepare_prompts
-from lib.vars import (
-    RUNTIME_DOWNLOADS,
-    USE_DREAMBOOTH,
-    MODEL_ID,
-    PIPELINE,
-    MODELS_DIR,
-)
+from lib.vars import MODEL_ID, PIPELINE, HOSTNAME, MODELS_DIR, RUNTIME_DOWNLOADS, USE_DREAMBOOTH, USE_PATCHMATCH
 
 if USE_DREAMBOOTH:
     from train_dreambooth import TrainDreamBooth
-print(os.environ.get("USE_PATCHMATCH"))
-if os.environ.get("USE_PATCHMATCH") == "1":
+if USE_PATCHMATCH:
     from PyPatchMatch import patch_match
+
 
 # Disable gradient computation in PyTorch by default since it's memory-intensive; only enable it when training
 torch.set_grad_enabled(False)
@@ -72,8 +66,8 @@ async def init():
         "start",
         {
             "device": device_name,
-            # HOSTNAME is set automatically in Linux; in a container it's the container's ID
-            "hostname": os.getenv("HOSTNAME"),
+
+            "hostname": HOSTNAME,
             "model_id": MODEL_ID,
             "diffusers": __version__,
         },
@@ -317,7 +311,7 @@ async def inference(all_inputs: dict, response, status_instance=None) -> dict:
             last_attn_procs = None
             last_lora_weights = None
 
-    if MODEL_ID == "ALL":
+    if MODEL_ID == "ANY":
         if model_filename != last_model_filename:
             clear_pipelines()
             cross_attention_kwargs = None
@@ -340,7 +334,7 @@ async def inference(all_inputs: dict, response, status_instance=None) -> dict:
                 }
             }
 
-    if PIPELINE == "ALL":
+    if PIPELINE == "ANY":
         pipeline_name = call_inputs.get("PIPELINE", None)
 
         # Extract the pipline name from the call inputs, use the default AutoPipelineForText2Image
@@ -366,7 +360,7 @@ async def inference(all_inputs: dict, response, status_instance=None) -> dict:
                 }
             }
     else:
-        # If the pipeline is not set to "ALL", use the model as the pipeline
+        # If the pipeline is not set to "ANY", use the model as the pipeline
         pipeline = model
 
     # Extract the scheduler name from the call inputs, or use the default DPMSolverMultistepScheduler

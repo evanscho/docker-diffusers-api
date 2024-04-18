@@ -5,6 +5,7 @@ import time
 import hashlib
 import logging
 from requests_futures.sessions import FuturesSession
+from lib.vars import SEND_URL, SIGNING_KEY, CONTAINER_ID
 
 
 class EventTimingsTracker:
@@ -26,9 +27,8 @@ class EventTimingsTracker:
             self.future_session = FuturesSession()
 
             # Get the URL to send data to, and the optional signing key that's used to verify the data
-            # If variable is set but is an empty string, os.getenv() returns "" instead of None
-            self.send_url = os.getenv("SEND_URL") or None
-            self.signing_key = os.getenv("SIGN_KEY") or None
+            self.send_url = SEND_URL
+            self.signing_key = SIGNING_KEY
 
             self.container_id = self.retrieve_container_id()
             self.is_first_run_after_server_start = True
@@ -57,7 +57,7 @@ class EventTimingsTracker:
 
     def retrieve_container_id(self):
         """Retrieve the container ID from environment or filesystem"""
-        container_id = os.getenv("CONTAINER_ID")
+        container_id = CONTAINER_ID
         if not container_id:
             try:
                 with open("/proc/self/mountinfo") as file:

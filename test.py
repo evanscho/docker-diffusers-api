@@ -16,7 +16,7 @@ path = "."
 TESTS = Path(path) / "tests"
 FIXTURES = TESTS / "fixtures"
 OUTPUT = TESTS / "output"
-TEST_URL = os.environ.get("TEST_URL", "http://localhost:8000/")
+TEST_URL = os.getenv("TEST_URL", "http://localhost:8000/")
 OUTPUT.mkdir(parents=True, exist_ok=True)
 
 

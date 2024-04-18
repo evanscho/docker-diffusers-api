@@ -13,7 +13,7 @@ import selectors
 from threading import Thread
 from argparse import Namespace
 
-AWS_S3_DEFAULT_BUCKET = os.environ.get("AWS_S3_DEFAULT_BUCKET", "test")
+AWS_S3_DEFAULT_BUCKET = os.getenv("AWS_S3_DEFAULT_BUCKET", "test")
 DOCKER_GW_IP = "172.17.0.1"  # will override below if found
 
 myContainers = list()

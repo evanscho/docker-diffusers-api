@@ -1,10 +1,7 @@
 import os
 import time
 from diffusers import schedulers as _schedulers
-
-HF_AUTH_TOKEN = os.getenv("HF_AUTH_TOKEN")
-HOME = os.path.expanduser("~")
-MODELS_DIR = os.path.join(HOME, ".cache", "diffusers-api")
+from lib.vars import HF_AUTH_TOKEN, MODELS_DIR
 
 SCHEDULERS = [
     "DPMSolverMultistepScheduler",
@@ -14,8 +11,6 @@ SCHEDULERS = [
     "EulerAncestralDiscreteScheduler",
     "EulerDiscreteScheduler",
 ]
-
-DEFAULT_SCHEDULER = os.getenv("DEFAULT_SCHEDULER", SCHEDULERS[0])
 
 
 def init_scheduler(model_id: str, scheduler_id: str, download=False):

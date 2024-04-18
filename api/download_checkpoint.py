@@ -1,8 +1,6 @@
 import os
 from utils import Storage
-
-CHECKPOINT_URL = os.environ.get("CHECKPOINT_URL", None)
-CHECKPOINT_DIR = "/root/.cache/checkpoints"
+from lib.vars import CHECKPOINT_URL, CHECKPOINT_DIR
 
 
 def main(checkpoint_url: str):

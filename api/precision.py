@@ -1,8 +1,6 @@
 import os
 import torch
-
-MODEL_PRECISION = os.getenv("MODEL_PRECISION")
-MODEL_REVISION = os.getenv("MODEL_REVISION")
+from lib.vars import MODEL_PRECISION, MODEL_REVISION
 
 
 if MODEL_PRECISION and not MODEL_REVISION:

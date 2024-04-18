@@ -6,9 +6,7 @@ import time
 from tqdm import tqdm
 from botocore.client import Config
 from .BaseStorage import BaseStorage
-
-AWS_S3_ENDPOINT_URL = os.getenv("AWS_S3_ENDPOINT_URL") or None
-AWS_S3_DEFAULT_BUCKET = os.getenv("AWS_S3_DEFAULT_BUCKET") or None
+from lib.vars import AWS_S3_ENDPOINT_URL, AWS_S3_DEFAULT_BUCKET
 
 
 def get_now():

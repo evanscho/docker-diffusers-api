@@ -11,12 +11,7 @@ from diffusers.pipelines.stable_diffusion import (
 )
 from utils import Storage
 from device import device_id
-
-MODEL_ID = os.environ.get("MODEL_ID", None)
-CHECKPOINT_DIR = "/root/.cache/checkpoints"
-CHECKPOINT_URL = os.environ.get("CHECKPOINT_URL", None)
-CHECKPOINT_CONFIG_URL = os.environ.get("CHECKPOINT_CONFIG_URL", None)
-CHECKPOINT_ARGS = os.environ.get("CHECKPOINT_ARGS", None)
+from lib.vars import MODEL_ID, CHECKPOINT_URL, CHECKPOINT_CONFIG_URL, CHECKPOINT_ARGS, CHECKPOINT_DIR
 
 
 def main(

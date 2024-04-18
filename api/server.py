@@ -17,6 +17,7 @@ import time
 from utils.logging import Tee
 import logging
 from event_completion_status import PercentageCompleteStatus, PercentageCompleteStatusSender
+from lib.vars import CORS_ORIGINS
 
 # Open the log file and create a Tee object that writes to both the log file and stdout/stderr
 log_file = open('training.log', 'a')
@@ -26,7 +27,7 @@ sys.stderr = Tee(sys.stderr, log_file)
 
 # Create the http server app
 app = Sanic("my_app")
-app.config.CORS_ORIGINS = os.getenv("CORS_ORIGINS") or "*"
+app.config.CORS_ORIGINS = CORS_ORIGINS
 app.config.RESPONSE_TIMEOUT = 60 * 60  # 1 hour (training and uploading can be long)
 app.config.KEEP_ALIVE_TIMEOUT = 60 * 60  # for keeping the connection alive when streaming
 app.config.NOISY_EXCEPTIONS = True
