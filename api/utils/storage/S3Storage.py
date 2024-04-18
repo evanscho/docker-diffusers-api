@@ -71,7 +71,6 @@ class S3Storage(BaseStorage):
             )
         upload_total = get_now() - upload_start
         print(f"Upload completed in {upload_total} milliseconds.")
-        return {"$time": upload_total}
 
     def download_file(self, dest):
         """Downloads a file from S3."""

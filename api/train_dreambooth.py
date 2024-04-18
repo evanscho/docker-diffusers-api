@@ -69,7 +69,6 @@ from diffusers.utils.torch_utils import is_compiled_module
 # DDA
 from utils import Storage
 import subprocess
-import re
 import asyncio
 from file_transfer_progress import perform_while_tracking_progress
 import traceback
@@ -78,25 +77,42 @@ from lib.vars import HF_AUTH_TOKEN
 # Our original code in docker-diffusers-api:
 
 
-def send_event_update(process_name: str, status: str, payload: dict = {}, options: dict = {}):
-    pipeline_run = options.get("pipeline_run", None)
-    event_loop = options.get("event_loop", None)
-    try:
-        if pipeline_run and event_loop:
-            asyncio.run_coroutine_threadsafe(pipeline_run.send_event_update(
-                process_name, status, payload, options), event_loop)
-        else:
-            logging.error("No event loop to send status update")
-    except Exception as e:
-        logging.error(
-            f"Failed to send status update: {e.__class__.__name__}: {str(e)}\n{traceback.format_exc()}")
-
-
 def TrainDreamBooth(model_id: str, pipeline, model_inputs, call_inputs, status_update_options, revision=None, variant=None):
-    # required inputs: instance_images instance_prompt
 
-    params = {
-        # Defaults
+    # The only two required model inputs are instance_images and instance_prompt
+    if not model_inputs.get("instance_images") and not model_inputs.get("instance_prompt"):
+        raise ValueError("instance_images and instance_prompt are required inputs")
+
+    # Clear the target directories upfront so they're empty for the new model
+    cleanup_directories(args.class_data_dir, args.instance_data_dir, args.output_dir)
+
+    instance_images = get_and_remove_instance_images_from_model_inputs(model_inputs)
+    args = initialize_args(model_id, model_inputs, revision, variant)
+    save_instance_images(instance_images, args.instance_data_dir)
+
+    training_result = train_model(args, pipeline, status_update_options)
+    upload_result = handle_upload(args, call_inputs, status_update_options)
+    uploaded_model_to_hub_or_url = upload_result.get(
+        "uploaded_model_to_hub") or upload_result.get("uploaded_model_to_url")
+
+    cleanup_directories(args.class_data_dir, args.instance_data_dir)
+    if uploaded_model_to_hub_or_url:
+        cleanup_directories(args.output_dir)
+
+    return training_result | upload_result
+
+
+def get_and_remove_instance_images_from_model_inputs(model_inputs):
+    """Return and remove instance_images so we don't print nor handle them unnecessarily."""
+    """Since instance images are huge base64 images."""
+    instance_images = model_inputs.get("instance_images")
+    del model_inputs["instance_images"]
+    return instance_images
+
+
+def initialize_args(model_id, model_inputs, revision, variant):
+    """Initialize and return the namespace with all arguments."""
+    default_params = {
         "pretrained_model_name_or_path": model_id,  # DDA, TODO
         # Revision of pretrained model identifier from huggingface.co/models. Trainable model components should be
         # float32 precision.
@@ -111,7 +127,7 @@ def TrainDreamBooth(model_id: str, pipeline, model_inputs, call_inputs, status_u
         "with_prior_preservation": False,
         "prior_loss_weight": 1.0,
         "num_class_images": 100,
-        "output_dir": "text-inversion-model",
+        "output_dir": "dreambooth-model",
         "seed": None,
         "resolution": 512,
         # Whether to center crop the input images to the resolution. If not set, the images will be randomly
@@ -122,7 +138,7 @@ def TrainDreamBooth(model_id: str, pipeline, model_inputs, call_inputs, status_u
         "train_batch_size": 1,  # DDA, was: 4
         "sample_batch_size": 1,  # DDA, was: 4,
         "num_train_epochs": 1,
-        "max_train_steps": 200,  # DDA, was: None,
+        "max_train_steps": 800,  # DDA, was: None,
         # Save a checkpoint of the training state every X updates. Checkpoints can be used for resuming training via `--resume_from_checkpoint`.
         # In the case that the checkpoint is better than the final trained model, the checkpoint can also be used for inference.
         # Using a checkpoint for inference requires separate loading of the original pipeline and the individual checkpointed model components.
@@ -201,78 +217,90 @@ def TrainDreamBooth(model_id: str, pipeline, model_inputs, call_inputs, status_u
         "validation_scheduler": "DPMSolverMultistepScheduler",  # "DPMSolverMultistepScheduler", "DDPMScheduler"
     }
 
-    instance_images = model_inputs["instance_images"]
-    del model_inputs["instance_images"]
-
-    params.update(model_inputs)
-    print(model_inputs)
-
+    # Merge default params with model-specific inputs, giving precedence to model_inputs
+    params = default_params | model_inputs
+    print('Dreambooth model overrides', model_inputs)
     args = argparse.Namespace(**params)
-    print(args)
+    print('Dreambooth arguments', args)
 
     if args.train_text_encoder and args.pre_compute_text_embeddings:
         raise ValueError(
             "`--train_text_encoder` cannot be used with `--pre_compute_text_embeddings`"
         )
 
-    result = {}
+    return args
 
-    if not args.push_to_hub and call_inputs.get("dest_url", None) == None:
-        print()
-        print("WARNING: Neither modelInputs.push_to_hub nor callInputs.dest_url")
-        print("was given.  After training, your model won't be uploaded anywhere.")
-        print()
-        result.update({"no_upload": True})
 
-    # TODO, not save at all... we're just getting it working
+def save_instance_images(instance_images, directory):
+    """Save instance images to the specified directory."""
+    # TODO, not save at all... we're just getting it working.
     # if its a hassle, in interim, at least save to unique dir
-    if not os.path.exists(args.instance_data_dir):
-        os.mkdir(args.instance_data_dir)
+    os.makedirs(directory, exist_ok=True)
     for i, image in enumerate(instance_images):
-        image.save(args.instance_data_dir + "/image" + str(i) + ".png")
+        image_path = os.path.join(directory, f"image{i}.png")
+        image.save(image_path)
 
-    subprocess.run(["ls", "-l", args.instance_data_dir])
 
-    result = result | main(args, pipeline, status_update_options=status_update_options)
-
-    dest_url = call_inputs.get("dest_url")
-    if dest_url:
-        storage = Storage(dest_url)
-        filename = storage.path if storage.path != "" else args.output_dir
-        filename = filename.split("/").pop()
-        print(filename)
-        if not re.search(r"\.", filename):
-            filename += ".tar.zstd"
-        print(filename)
-
-        # fp16 model timings: zip 1m20s, tar+zstd 4s and a tiny bit smaller!
-        send_event_update("compress", "start", {}, status_update_options)
-
-        # TODO, steaming upload (turns out docker disk write is super slow)
-        subprocess.run(
-            f"tar cvf - -C {args.output_dir} . | zstd -o {filename}",
-            shell=True,
-            check=True,  # TODO, rather don't raise and return an error in JSON
-        )
-
-        send_event_update("compress", "done", {}, status_update_options)
-        subprocess.run(["ls", "-l", filename])
-
-        send_event_update("upload", "start", {}, status_update_options)
-        upload_result = storage.upload_file(filename, filename)
-        send_event_update("upload", "done", {}, status_update_options)
-        print(upload_result)
-        os.remove(filename)
-
-    # Cleanup
-    shutil.rmtree(args.output_dir)
-    shutil.rmtree(args.class_data_dir, ignore_errors=True)
-
+def train_model(args, pipeline, status_update_options):
+    """Handle the training of the model."""
+    result = {}  # Dictionary to gather results
+    # Assuming main is a function from another module that performs the training
+    result = main(args, pipeline, status_update_options=status_update_options)
     return result
 
 
+def handle_upload(args, call_inputs, status_update_options):
+    """Handle the uploading of the model if required."""
+    """Note that if pushed to Hugging Face, that happens within the core training function."""
+    dest_url = call_inputs.get("dest_url")
+    upload_result = {}
+
+    if args.push_to_hub:
+        upload_result = upload_result | {"uploaded_model_to_hub": True}
+    if dest_url:
+        storage = Storage(dest_url)
+        filename = os.path.basename(args.output_dir) + ".tar.zstd"
+        tar_command = f"tar cvf - -C {args.output_dir} . | zstd -o {filename}"
+
+        send_event_update("compress", "start", {}, status_update_options)
+
+        # fp16 model timings: zip 1m20s, tar+zstd 4s and a tiny bit smaller!
+        # TODO, steaming upload (turns out docker disk write is super slow)
+        subprocess.run(tar_command, shell=True, check=True)  # TODO, don't raise and return an error in JSON
+
+        send_event_update("compress", "done", {}, status_update_options)
+
+        storage.upload_file(filename)
+        os.remove(filename)
+        upload_result = upload_result | {"uploaded_model_to_url": dest_url}
+    if not args.push_to_hub and call_inputs.get("dest_url", None) == None:
+        upload_result = upload_result | {"saved_model_to_disk": args.output_dir}
+
+    return upload_result
+
+
+def cleanup_directories(*directories):
+    """Remove specified directories."""
+    for directory in directories:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def send_event_update(process_name: str, status: str, payload: dict = {}, options: dict = {}):
+    pipeline_run = options.get("pipeline_run", None)
+    event_loop = options.get("event_loop", None)
+    try:
+        if pipeline_run and event_loop:
+            asyncio.run_coroutine_threadsafe(pipeline_run.send_event_update(
+                process_name, status, payload, options), event_loop)
+        else:
+            logging.error("No event loop to send status update")
+    except Exception as e:
+        logging.error(
+            f"Failed to send status update: {e.__class__.__name__}: {str(e)}\n{traceback.format_exc()}")
+
+
 # What follows is mostly the original train_dreambooth.py
-# Any changes are marked with in comments with [DDA].
+# Any changes are marked with in comments with [DDA] or [ESS].
 
 if is_wandb_available():
     import wandb
@@ -1278,13 +1306,11 @@ def main(args, init_pipeline, status_update_options):  # DDA
         pipeline.save_pretrained(args.output_dir, safe_serialization=True)  # DDA
 
         if args.push_to_hub:
-            upload_to_huggingface(repo_id, images, pipeline, args, status_update_options)
-
-        send_event_update("upload", "done", {}, status_update_options)  # DDA
+            upload_to_huggingface(repo_id, images, pipeline, args, status_update_options)  # ESS
 
     accelerator.end_training()
 
-    return {"done": True}  # DDA
+    return {"dreambooth_training_successful": True}  # ESS
 
 
 def upload_to_huggingface(repo_id, images, pipeline, args, status_update_options):  # DDA
@@ -1298,8 +1324,8 @@ def upload_to_huggingface(repo_id, images, pipeline, args, status_update_options
         repo_folder=args.output_dir,
         pipeline=pipeline,
     )
-    status_instance = status_update_options.get("status_instance", None)
-    perform_while_tracking_progress(upload_folder, {
+    status_instance = status_update_options.get("status_instance", None)  # ESS
+    perform_while_tracking_progress(upload_folder, {  # ESS
         "repo_id": repo_id,
         "folder_path": args.output_dir,
         "commit_message": "End of training",
@@ -1308,6 +1334,7 @@ def upload_to_huggingface(repo_id, images, pipeline, args, status_update_options
         "token": args.hub_token,   # ESS: without this, get 401 RepositoryNotFoundError if didn't create new repo, since we were only passing the token in create_repo
         # run_as_future: DDA TODO Whether or not to run this method in the background
     }, "upload", status_instance)
+    send_event_update("upload", "done", {}, status_update_options)  # DDA
 
 
 # DDA

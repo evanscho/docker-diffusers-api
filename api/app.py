@@ -91,23 +91,23 @@ async def init():
     await EventTimingsTracker().send_event_update("init", "done")
 
 
-def decodeBase64Image(imageStr: str, name: str) -> PIL.Image:
-    """Function to decode a base64-encoded image"""
+def decode_base64_image(imageStr: str, name: str) -> PIL.Image:
+    """Decode a base64-encoded image"""
     image = PIL.Image.open(BytesIO(base64.decodebytes(bytes(imageStr, "utf-8"))))
-    print(f'Decoded image "{name}": {image.format} {image.width}x{image.height}')
+    # print(f'Decoded image "{name}": {image.format} {image.width}x{image.height}')
     return image
 
 
-def getFromUrl(url: str, name: str) -> PIL.Image:
-    """Function to download an image from a URL"""
+def decode_image_from_url(url: str, name: str) -> PIL.Image:
+    """Download and decode an image from a URL"""
     response = requests.get(url)
     image = PIL.Image.open(BytesIO(response.content))
-    print(f'Decoded image "{name}": {image.format} {image.width}x{image.height}')
+    # print(f'Decoded image "{name}": {image.format} {image.width}x{image.height}')
     return image
 
 
-def truncateInputs(inputs: dict):
-    """Function to truncate inputs to a manageable size for logging or debugging"""
+def truncate_inputs(inputs: dict):
+    """Truncate inputs to a manageable size for logging or debugging"""
     inputs_copy = inputs.copy()
     if "modelInputs" in inputs_copy:
         # Create a shallow copy of the modelInputs dictionary since even with the shalow copy of 'inputs',
@@ -169,7 +169,7 @@ def print_inputs_and_env_variables(inputs):
     print(env_variables_masked())
     print()
     print("Inputs:")
-    print(json.dumps(truncateInputs(inputs), indent=2))
+    print(json.dumps(truncate_inputs(inputs), indent=2))
 
 
 last_attn_procs = None
@@ -391,7 +391,7 @@ async def inference(all_inputs: dict, response, status_instance=None) -> dict:
     is_url = call_inputs.get("is_url", False)
 
     # Select the image decoder based on whether the input is an image Url or a base64-encoded image
-    image_decoder = getFromUrl if is_url else decodeBase64Image
+    image_decoder = decode_image_from_url if is_url else decode_base64_image
 
     # Extract the textual inversions from the call inputs and load them if necessary
     textual_inversions = call_inputs.get("textual_inversions", [])

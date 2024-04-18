@@ -192,7 +192,6 @@ async def upsample(model_inputs, call_inputs, status_update_options={}, startReq
     if face_enhance:  # Use GFPGAN for face enhancement
         face_enhancer.bg_upsampler = upsampler
 
-    # image = decodeBase64Image(model_inputs.get("input_image"))
     image_str = base64.b64decode(model_inputs["input_image"])
     image_np = np.frombuffer(image_str, dtype=np.uint8)
     # bytes = BytesIO(base64.decodebytes(bytes(model_inputs["input_image"], "utf-8")))
